@@ -24,8 +24,8 @@
 
 ## 🧪 Setup Instructions
 ```bash
-git clone https://github.com/yourusername/emotiva.git
-cd emotiva
+git clone https://github.com/kingkw1/AffectLink.git
+cd AffectLink
 pip install -r requirements.txt
 python app/main.py
 ```
