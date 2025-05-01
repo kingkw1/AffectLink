@@ -1,4 +1,4 @@
-# AffectLink Multimodal Emotion Consistency Tracking for Telehealth
+# AffectLink: Multimodal Emotion Consistency Tracking for Telehealth
 
 **AffectLink** is an AI-powered system that analyzes a patient’s emotional state by comparing facial expressions with vocal tone. It helps identify inconsistencies, fatigue, or stress — providing clinicians with real-time and retrospective emotional insights during virtual sessions.
 
