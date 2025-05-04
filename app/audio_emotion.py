@@ -6,8 +6,11 @@ from collections import deque
 
 import torch
 import whisper
-from transformers import pipeline
+from transformers import pipeline, AutoModelForAudioClassification
 import sounddevice as sd
+import numpy as np
+import librosa
+from transformers import AutoFeatureExtractor
 
 # ---------------------------
 # Helper functions
@@ -32,6 +35,30 @@ def classify_emotion(text, classifier):
         return result['label'], result['score']
     except Exception as e:
         print(f"Emotion classification error: {e}")
+        return None, None
+
+def analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mapping, device):
+    """
+    Analyze emotion directly from audio using a pre-trained SER model.
+    Loads the audio, processes it, and predicts emotion and confidence.
+    """
+    try:
+        # Load audio (mono, 16kHz)
+        waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
+        # Pass numpy array directly to feature extractor
+        inputs = ser_processor(waveform, sampling_rate=16000, return_tensors="pt")
+        # Move to device
+        for k in inputs:
+            inputs[k] = inputs[k].to(device)
+        with torch.no_grad():
+            outputs = ser_model(**inputs)
+            scores = torch.nn.functional.softmax(outputs.logits, dim=1)[0]
+            pred_idx = scores.argmax().item()
+            pred_label = ser_label_mapping[pred_idx]
+            pred_score = scores[pred_idx].item()
+        return pred_label, pred_score
+    except Exception as e:
+        print(f"Audio SER error: {e}")
         return None, None
 
 def record_audio_chunk(duration=5, fs=16000):
@@ -62,7 +89,7 @@ def moving_average(scores):
 # Main script
 # ---------------------------
 def main():
-    print("Speech Emotion Detection")
+    print("Speech Emotion Detection (Text & Audio)")
     print("Select input source:")
     print("1. Audio file")
     print("2. Microphone (live)")
@@ -71,13 +98,22 @@ def main():
     # Load models
     print("Loading Whisper model...")
     whisper_model = whisper.load_model("base")
-    print("Loading emotion classification model...")
+    print("Loading text-based emotion classification model...")
     classifier = pipeline(
         "text-classification",
         model="j-hartmann/emotion-english-distilroberta-base",
         top_k=None,
         device=0 if torch.cuda.is_available() else -1
     )
+    # print("Loading audio-based SER model (speechbrain/emotion-recognition-wav2vec2)...")
+    # ser_model_id = "speechbrain/emotion-recognition-wav2vec2-IEMOCAP"
+    ser_model_id = "superb/hubert-large-superb-er"
+    print("Loading audio-based SER model...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ser_model = AutoModelForAudioClassification.from_pretrained(ser_model_id).to(device)
+    ser_processor = AutoFeatureExtractor.from_pretrained(ser_model_id)
+    
+    ser_label_mapping = ser_model.config.id2label
     
     if source == '1':
         audio_path = input("Enter path to audio file: ").strip()
@@ -90,35 +126,66 @@ def main():
             print("No transcription available.")
             sys.exit(1)
         print(f"Transcribed text: {text}")
-        emotion, score = classify_emotion(text, classifier)
-        if emotion:
-            print(f"Detected emotion: {emotion} (confidence: {score:.2f})")
+        # Text-based emotion
+        text_emotion, text_score = classify_emotion(text, classifier)
+        # Audio-based emotion
+        audio_emotion, audio_score = analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mapping, device)
+        print("--- Results ---")
+        if text_emotion:
+            print(f"[Text]    Detected emotion: {text_emotion} (confidence: {text_score:.2f})")
         else:
-            print("Could not detect emotion.")
+            print("[Text]    Could not detect emotion.")
+        if audio_emotion:
+            print(f"[Audio]   Detected emotion: {audio_emotion} (confidence: {audio_score:.2f})")
+        else:
+            print("[Audio]   Could not detect emotion.")
     elif source == '2':
         chunk_duration = 5
         smoothing_window = 3
         emotion_window = deque(maxlen=smoothing_window)
         score_window = deque(maxlen=smoothing_window)
+        audio_emotion_window = deque(maxlen=smoothing_window)
+        audio_score_window = deque(maxlen=smoothing_window)
         print("Starting live microphone emotion detection. Press Ctrl+C to stop.")
         try:
             while True:
                 temp_wav = record_audio_chunk(duration=chunk_duration)
                 text = transcribe_audio_whisper(temp_wav, whisper_model)
+                # Audio-based SER
+                audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
                 os.unlink(temp_wav)
                 if not text or text.strip() == "":
                     print("No speech detected.")
                     continue
                 print(f"Transcribed: {text}")
+                # Text-based emotion
                 emotion, score = classify_emotion(text, classifier)
                 if emotion:
                     emotion_window.append(emotion)
                     score_window.append(score)
                     smoothed_emotion = max(set(emotion_window), key=emotion_window.count)
                     smoothed_score = moving_average([s for e, s in zip(emotion_window, score_window) if e == smoothed_emotion])
-                    print(f"Smoothed emotion: {smoothed_emotion} (confidence: {smoothed_score:.2f})")
                 else:
-                    print("Could not detect emotion.")
+                    smoothed_emotion = None
+                    smoothed_score = 0
+                # Audio-based smoothing
+                if audio_emotion:
+                    audio_emotion_window.append(audio_emotion)
+                    audio_score_window.append(audio_score)
+                    smoothed_audio_emotion = max(set(audio_emotion_window), key=audio_emotion_window.count)
+                    smoothed_audio_score = moving_average([s for e, s in zip(audio_emotion_window, audio_score_window) if e == smoothed_audio_emotion])
+                else:
+                    smoothed_audio_emotion = None
+                    smoothed_audio_score = 0
+                print("--- Results ---")
+                if smoothed_emotion:
+                    print(f"[Text]    Smoothed emotion: {smoothed_emotion} (confidence: {smoothed_score:.2f})")
+                else:
+                    print("[Text]    Could not detect emotion.")
+                if smoothed_audio_emotion:
+                    print(f"[Audio]   Smoothed emotion: {smoothed_audio_emotion} (confidence: {smoothed_audio_score:.2f})")
+                else:
+                    print("[Audio]   Could not detect emotion.")
         except KeyboardInterrupt:
             print("Exiting microphone emotion detection.")
     else:
