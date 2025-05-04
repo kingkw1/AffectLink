@@ -1,2 +1,7 @@
 # Personal files
 TaskBreakdown.md
+.venv/*
+references/*
+
+*.ipynb_checkpoints/*
+*.ipynb_checkpoints
