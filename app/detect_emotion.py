@@ -213,12 +213,9 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
     while not stop_flag['stop']:
         temp_wav = record_audio_chunk(duration=chunk_duration)
         text = transcribe_audio_whisper(temp_wav, whisper_model)
-        print(f"DEBUG: Whisper transcribed text: '{text}'") # Added for debugging
 
         # Get all text emotion scores
-        print(f"DEBUG: Text input to emotion classifier: '{text}'") # Added for debugging
         text_emotion_scores_raw = classifier(text, top_k=None) if text else [] # Get raw output
-        print(f"DEBUG: Raw output from text emotion classifier: {text_emotion_scores_raw}") # Added for debugging
 
         text_emotion_scores = []
         if text and text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
@@ -252,7 +249,6 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 'confidence': smoothed_score,
                 'emotion_scores': text_emotion_scores
             }
-            print(f"DEBUG: Adding to audio_emotion_log (text): {log_entry_text}") # Added for debugging
             with audio_lock:
                 audio_emotion_log.append(log_entry_text)
         # Smoothing audio emotions
@@ -444,7 +440,6 @@ def main(live=True):
                     current_time_audio = time.time() # Use a separate timestamp if needed for strict independence
                     audio_window = [a for a in audio_emotion_log if current_time_audio - a['timestamp'] <= AUDIO_WINDOW_DURATION]
 
-                print(f"DEBUG: audio_emotion_log content: {audio_emotion_log}") # Added for debugging
                 matches = match_multimodal_emotions(video_window, audio_window)
                 if matches:
                     print("\n--- Multimodal Matches (real-time, threaded) ---")
