@@ -168,29 +168,35 @@ def main():
         print("Starting live microphone emotion detection. Press Ctrl+C to stop.")
         try:
             while True:
-                # Record the start time of the chunk
-                chunk_start_time = time.time()
                 temp_wav = record_audio_chunk(duration=chunk_duration)
-                # Calculate the midpoint time of the chunk
-                chunk_mid_time = chunk_start_time + (chunk_duration / 2)
+
+                # Transcribe audio chunk
                 text = transcribe_audio_whisper(temp_wav, whisper_model)
-                # Audio-based SER
+
+                # Perform audio-based SER first (timestamp after analysis)
                 audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
-                os.unlink(temp_wav)
+                audio_timestamp = time.time()  # timestamp right after audio SER
+
+                # Transcribe text and classify emotion
                 if not text or text.strip() == "":
                     print("No speech detected.")
+                    os.unlink(temp_wav)
                     continue
                 print(f"Transcribed: {text}")
-                # Text-based emotion
+
                 emotion, score = classify_emotion(text, classifier)
+                text_timestamp = time.time()  # timestamp right after text classification
+
+                os.unlink(temp_wav)
+
+                # Smoothing text emotions
                 if emotion:
                     emotion_window.append(emotion)
                     score_window.append(score)
                     smoothed_emotion = max(set(emotion_window), key=emotion_window.count)
                     smoothed_score = moving_average([s for e, s in zip(emotion_window, score_window) if e == smoothed_emotion])
-                    # Timestamp the text-based emotion with the midpoint of the chunk
                     audio_emotion_log.append({
-                        'timestamp': chunk_mid_time,
+                        'timestamp': text_timestamp,
                         'modality': 'text',
                         'emotion': smoothed_emotion,
                         'confidence': smoothed_score
@@ -198,15 +204,15 @@ def main():
                 else:
                     smoothed_emotion = None
                     smoothed_score = 0
-                # Audio-based smoothing
+
+                # Smoothing audio emotions
                 if audio_emotion:
                     audio_emotion_window.append(audio_emotion)
                     audio_score_window.append(audio_score)
                     smoothed_audio_emotion = max(set(audio_emotion_window), key=audio_emotion_window.count)
                     smoothed_audio_score = moving_average([s for e, s in zip(audio_emotion_window, audio_score_window) if e == smoothed_audio_emotion])
-                    # Timestamp the audio-based emotion with the midpoint of the chunk
                     audio_emotion_log.append({
-                        'timestamp': chunk_mid_time,
+                        'timestamp': audio_timestamp,
                         'modality': 'audio',
                         'emotion': smoothed_audio_emotion,
                         'confidence': smoothed_audio_score
@@ -214,17 +220,18 @@ def main():
                 else:
                     smoothed_audio_emotion = None
                     smoothed_audio_score = 0
+
+                # Print results with their respective timestamps
                 print("--- Results ---")
                 if smoothed_emotion:
-                    print(f"[{chunk_mid_time:.3f}] [Text]    Smoothed emotion: {smoothed_emotion} (confidence: {smoothed_score:.2f})")
+                    print(f"[{text_timestamp:.3f}] [Text]    Smoothed emotion: {smoothed_emotion} (confidence: {smoothed_score:.2f})")
                 else:
                     print("[Text]    Could not detect emotion.")
                 if smoothed_audio_emotion:
-                    print(f"[{chunk_mid_time:.3f}] [Audio]   Smoothed emotion: {smoothed_audio_emotion} (confidence: {smoothed_audio_score:.2f})")
+                    print(f"[{audio_timestamp:.3f}] [Audio]   Smoothed emotion: {smoothed_audio_emotion} (confidence: {smoothed_audio_score:.2f})")
                 else:
                     print("[Audio]   Could not detect emotion.")
-                # Optionally, print or save the log for later use
-                # print(audio_emotion_log)
+
         except KeyboardInterrupt:
             print("Exiting microphone emotion detection.")
     else:
