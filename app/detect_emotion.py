@@ -16,6 +16,7 @@ import cv2
 from deepface import DeepFace
 import logging
 import threading
+from moviepy import VideoFileClip
 
 # ---------------------------
 # Helper functions
@@ -225,13 +226,9 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
 # Suppress DeepFace logging for cleaner console output
 logging.getLogger().setLevel(logging.ERROR)
 
-def main():
-    print("Speech Emotion Detection (Text, Audio & Video)")
-    print("Select input source:")
-    print("1. Audio file")
-    print("2. Microphone (live)")
-    source = input("Enter 1 or 2: ").strip()
-    
+def main(live=True):
+    # Set detection mode based on argument
+    print(f"Detection mode: {'live' if live else 'video_file'}")
     # Load models
     print("Loading Whisper model...")
     whisper_model = whisper.load_model("base")
@@ -249,31 +246,72 @@ def main():
     ser_processor = AutoFeatureExtractor.from_pretrained(ser_model_id)
     ser_label_mapping = ser_model.config.id2label
 
-    # List to store timestamped audio emotion results
-    audio_emotion_log = []
-    
-    if source == '1':
-        audio_path = input("Enter path to audio file: ").strip()
-        if not os.path.isfile(audio_path):
+    if not live:
+        print("Video File Emotion Detection Mode")
+        video_path = input("Enter path to video file: ").strip()
+        if not os.path.isfile(video_path):
             print("File not found.")
-            sys.exit(1)
-        print(f"Transcribing audio file: {audio_path}")
+            return
+        # Extract audio from video file
+        print("Extracting audio from video file...")
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
+            audio_path = temp_audio.name
+        try:
+            videoclip = VideoFileClip(video_path)
+            videoclip.audio.write_audiofile(audio_path, fps=16000, nbytes=2, codec='pcm_s16le', verbose=False, logger=None)
+        except Exception as e:
+            print(f"Audio extraction failed: {e}")
+            return
+        # Process video frames for facial emotion detection
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print("Error: Cannot open video file.")
+            return
+        video_emotions = []
+        print("Processing video file for facial emotions...")
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            try:
+                results = DeepFace.analyze(
+                    img_path=frame,
+                    actions=['emotion'],
+                    enforce_detection=False,
+                    detector_backend='opencv'
+                )
+                faces = results if isinstance(results, list) else [results]
+                for face in faces:
+                    if 'dominant_emotion' in face:
+                        emo = face['dominant_emotion']
+                        confidence = face.get('emotion', {}).get(emo, None)
+                        timestamp = time.time()
+                        video_emotions.append({
+                            'timestamp': timestamp,
+                            'emotion': emo,
+                            'confidence': confidence
+                        })
+                        print(f"[Video {timestamp:.3f}] Detected emotion: {emo} (confidence: {confidence})")
+                    else:
+                        print("No face detected or emotion data unavailable.")
+            except Exception as e:
+                print(f"Video analysis error: {e}")
+        cap.release()
+        print("Video file processing complete. Total frames analyzed:", len(video_emotions))
+        # Process extracted audio file for emotions
+        print("Processing extracted audio for emotions...")
+        audio_emotion_log = []
         text = transcribe_audio_whisper(audio_path, whisper_model)
-        if not text:
-            print("No transcription available.")
-            sys.exit(1)
-        print(f"Transcribed text: {text}")
-        # Text-based emotion
-        text_emotion, text_score = classify_emotion(text, classifier)
-        text_timestamp = time.time()
-        if text_emotion:
-            audio_emotion_log.append({
-                'timestamp': text_timestamp,
-                'modality': 'text',
-                'emotion': text_emotion,
-                'confidence': text_score
-            })
-        # Audio-based emotion
+        if text:
+            text_emotion, text_score = classify_emotion(text, classifier)
+            text_timestamp = time.time()
+            if text_emotion:
+                audio_emotion_log.append({
+                    'timestamp': text_timestamp,
+                    'modality': 'text',
+                    'emotion': text_emotion,
+                    'confidence': text_score
+                })
         audio_emotion, audio_score = analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mapping, device)
         audio_timestamp = time.time()
         if audio_emotion:
@@ -283,8 +321,8 @@ def main():
                 'emotion': audio_emotion,
                 'confidence': audio_score
             })
-        print("--- Results ---")
-        if text_emotion:
+        print("--- Audio Results ---")
+        if text:
             print(f"[{text_timestamp:.3f}] [Text]    Detected emotion: {text_emotion} (confidence: {text_score:.2f})")
         else:
             print("[Text]    Could not detect emotion.")
@@ -292,20 +330,12 @@ def main():
             print(f"[{audio_timestamp:.3f}] [Audio]   Detected emotion: {audio_emotion} (confidence: {audio_score:.2f})")
         else:
             print("[Audio]   Could not detect emotion.")
-        # Optionally, print or save the log for later use
-        # print(audio_emotion_log)
-        # Simulate video_emotions for testing (timestamps near audio_emotion_log)
-        now = time.time()
-        video_emotions = [
-            {'timestamp': text_timestamp-0.5, 'emotion': 'neutral', 'confidence': 0.7},
-            {'timestamp': audio_timestamp, 'emotion': 'happy', 'confidence': 0.8}
-        ]
-        print("\n--- Multimodal Matches (simulated video) ---")
-        matches = match_multimodal_emotions(video_emotions, audio_emotion_log)
-        for m in matches:
-            print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']:.2f}) | "
-                  f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']:.2f}) @ t={m['audio_timestamp']:.3f}")
-    elif source == '2':
+        # Optionally, perform multimodal matching here
+        # matches = match_multimodal_emotions(video_emotions, audio_emotion_log)
+        # print(matches)
+        # Clean up temp audio file
+        os.remove(audio_path)
+    else:
         print("Starting live microphone and video emotion detection (threaded). Press Ctrl+C to stop.")
         video_emotions = []
         audio_emotion_log = []
@@ -335,8 +365,6 @@ def main():
             stop_flag['stop'] = True
         video_thread.join()
         audio_thread.join()
-    else:
-        print("Invalid input. Exiting.")
 
 if __name__ == "__main__":
     main()
