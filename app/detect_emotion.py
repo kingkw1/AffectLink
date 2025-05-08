@@ -15,6 +15,7 @@ from transformers import AutoFeatureExtractor
 import cv2
 from deepface import DeepFace
 import logging
+import threading
 
 # ---------------------------
 # Helper functions
@@ -114,6 +115,110 @@ def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0
                 })
     return matches
 
+def video_processing_loop(video_emotions, video_lock, stop_flag):
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Cannot access webcam.")
+        stop_flag['stop'] = True
+        return
+    while not stop_flag['stop']:
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Failed to read video frame.")
+            break
+        try:
+            results = DeepFace.analyze(
+                img_path=frame,
+                actions=['emotion'],
+                enforce_detection=False,
+                detector_backend='opencv'
+            )
+            faces = results if isinstance(results, list) else [results]
+            for face in faces:
+                if 'dominant_emotion' in face:
+                    emo = face['dominant_emotion']
+                    confidence = face.get('emotion', {}).get(emo, None)
+                    timestamp = time.time()
+                    with video_lock:
+                        video_emotions.append({
+                            'timestamp': timestamp,
+                            'emotion': emo,
+                            'confidence': confidence
+                        })
+                    # Draw rectangle and overlay text
+                    region = face.get('region', {})
+                    x, y, w, h = region.get('x',0), region.get('y',0), region.get('w',0), region.get('h',0)
+                    cv2.rectangle(frame, (x,y), (x+w, y+h), (0,255,0), 2)
+                    text_y = y-10 if y-10>10 else y+h+20
+                    cv2.putText(frame, f"{emo}", (x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+                    print(f"[Video {timestamp:.3f}] Detected emotion: {emo} (confidence: {confidence})")
+                else:
+                    print("No face detected or emotion data unavailable.")
+        except Exception as e:
+            print(f"Video analysis error: {e}")
+        cv2.imshow('Real-time Video Emotion Detection', frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            stop_flag['stop'] = True
+            break
+    cap.release()
+    cv2.destroyAllWindows()
+
+def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device):
+    chunk_duration = 5
+    smoothing_window = 3
+    emotion_window = deque(maxlen=smoothing_window)
+    score_window = deque(maxlen=smoothing_window)
+    audio_emotion_window = deque(maxlen=smoothing_window)
+    audio_score_window = deque(maxlen=smoothing_window)
+    while not stop_flag['stop']:
+        temp_wav = record_audio_chunk(duration=chunk_duration)
+        text = transcribe_audio_whisper(temp_wav, whisper_model)
+        audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
+        audio_timestamp = time.time()
+        if not text or text.strip() == "":
+            print("No speech detected.")
+            os.unlink(temp_wav)
+            continue
+        print(f"Transcribed: {text}")
+        emotion, score = classify_emotion(text, classifier)
+        text_timestamp = time.time()
+        os.unlink(temp_wav)
+        # Smoothing text emotions
+        if emotion:
+            emotion_window.append(emotion)
+            score_window.append(score)
+            smoothed_emotion = max(set(emotion_window), key=emotion_window.count)
+            smoothed_score = moving_average([s for e, s in zip(emotion_window, score_window) if e == smoothed_emotion])
+            with audio_lock:
+                audio_emotion_log.append({
+                    'timestamp': text_timestamp,
+                    'modality': 'text',
+                    'emotion': smoothed_emotion,
+                    'confidence': smoothed_score
+                })
+        # Smoothing audio emotions
+        if audio_emotion:
+            audio_emotion_window.append(audio_emotion)
+            audio_score_window.append(audio_score)
+            smoothed_audio_emotion = max(set(audio_emotion_window), key=audio_emotion_window.count)
+            smoothed_audio_score = moving_average([s for e, s in zip(audio_emotion_window, audio_score_window) if e == smoothed_audio_emotion])
+            with audio_lock:
+                audio_emotion_log.append({
+                    'timestamp': audio_timestamp,
+                    'modality': 'audio',
+                    'emotion': smoothed_audio_emotion,
+                    'confidence': smoothed_audio_score
+                })
+        print("--- Results ---")
+        if emotion:
+            print(f"[{text_timestamp:.3f}] [Text]    Smoothed emotion: {smoothed_emotion} (confidence: {smoothed_score:.2f})")
+        else:
+            print("[Text]    Could not detect emotion.")
+        if audio_emotion:
+            print(f"[{audio_timestamp:.3f}] [Audio]   Smoothed emotion: {smoothed_audio_emotion} (confidence: {smoothed_audio_score:.2f})")
+        else:
+            print("[Audio]   Could not detect emotion.")
+
 # ---------------------------
 # Main script
 # ---------------------------
@@ -201,125 +306,35 @@ def main():
             print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']:.2f}) | "
                   f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']:.2f}) @ t={m['audio_timestamp']:.3f}")
     elif source == '2':
-        chunk_duration = 5
-        smoothing_window = 3
-        emotion_window = deque(maxlen=smoothing_window)
-        score_window = deque(maxlen=smoothing_window)
-        audio_emotion_window = deque(maxlen=smoothing_window)
-        audio_score_window = deque(maxlen=smoothing_window)
-        print("Starting live microphone and video emotion detection. Press Ctrl+C to stop.")
-        # Initialize video capture (0 = default webcam)
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("Error: Cannot access webcam.")
-            return
+        print("Starting live microphone and video emotion detection (threaded). Press Ctrl+C to stop.")
         video_emotions = []
+        audio_emotion_log = []
+        video_lock = threading.Lock()
+        audio_lock = threading.Lock()
+        stop_flag = {'stop': False}
+        # Start threads
+        video_thread = threading.Thread(target=video_processing_loop, args=(video_emotions, video_lock, stop_flag))
+        audio_thread = threading.Thread(target=audio_processing_loop, args=(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device))
+        video_thread.start()
+        audio_thread.start()
         try:
-            while True:
-                # --- Video frame capture and analysis ---
-                ret, frame = cap.read()
-                if not ret:
-                    print("Error: Failed to read video frame.")
-                    break
-                try:
-                    results = DeepFace.analyze(
-                        img_path=frame,
-                        actions=['emotion'],
-                        enforce_detection=False,
-                        detector_backend='opencv'
-                    )
-                    faces = results if isinstance(results, list) else [results]
-                    for face in faces:
-                        if 'dominant_emotion' in face:
-                            emo = face['dominant_emotion']
-                            confidence = face.get('emotion', {}).get(emo, None)
-                            timestamp = time.time()
-                            video_emotions.append({
-                                'timestamp': timestamp,
-                                'emotion': emo,
-                                'confidence': confidence
-                            })
-                            # Draw rectangle and overlay text
-                            region = face.get('region', {})
-                            x, y, w, h = region.get('x',0), region.get('y',0), region.get('w',0), region.get('h',0)
-                            cv2.rectangle(frame, (x,y), (x+w, y+h), (0,255,0), 2)
-                            text_y = y-10 if y-10>10 else y+h+20
-                            cv2.putText(frame, f"{emo}", (x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-                            print(f"[Video {timestamp:.3f}] Detected emotion: {emo} (confidence: {confidence})")
-                        else:
-                            print("No face detected or emotion data unavailable.")
-                except Exception as e:
-                    print(f"Video analysis error: {e}")
-                # Show video frame
-                cv2.imshow('Real-time Video Emotion Detection', frame)
-                # --- Audio chunk capture and analysis ---
-                temp_wav = record_audio_chunk(duration=chunk_duration)
-                text = transcribe_audio_whisper(temp_wav, whisper_model)
-                audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
-                audio_timestamp = time.time()
-                if not text or text.strip() == "":
-                    print("No speech detected.")
-                    os.unlink(temp_wav)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-                    continue
-                print(f"Transcribed: {text}")
-                emotion, score = classify_emotion(text, classifier)
-                text_timestamp = time.time()
-                os.unlink(temp_wav)
-                # Smoothing text emotions
-                if emotion:
-                    emotion_window.append(emotion)
-                    score_window.append(score)
-                    smoothed_emotion = max(set(emotion_window), key=emotion_window.count)
-                    smoothed_score = moving_average([s for e, s in zip(emotion_window, score_window) if e == smoothed_emotion])
-                    audio_emotion_log.append({
-                        'timestamp': text_timestamp,
-                        'modality': 'text',
-                        'emotion': smoothed_emotion,
-                        'confidence': smoothed_score
-                    })
-                else:
-                    smoothed_emotion = None
-                    smoothed_score = 0
-                # Smoothing audio emotions
-                if audio_emotion:
-                    audio_emotion_window.append(audio_emotion)
-                    audio_score_window.append(audio_score)
-                    smoothed_audio_emotion = max(set(audio_emotion_window), key=audio_emotion_window.count)
-                    smoothed_audio_score = moving_average([s for e, s in zip(audio_emotion_window, audio_score_window) if e == smoothed_audio_emotion])
-                    audio_emotion_log.append({
-                        'timestamp': audio_timestamp,
-                        'modality': 'audio',
-                        'emotion': smoothed_audio_emotion,
-                        'confidence': smoothed_audio_score
-                    })
-                else:
-                    smoothed_audio_emotion = None
-                    smoothed_audio_score = 0
-                print("--- Results ---")
-                if smoothed_emotion:
-                    print(f"[{text_timestamp:.3f}] [Text]    Smoothed emotion: {smoothed_emotion} (confidence: {smoothed_score:.2f})")
-                else:
-                    print("[Text]    Could not detect emotion.")
-                if smoothed_audio_emotion:
-                    print(f"[{audio_timestamp:.3f}] [Audio]   Smoothed emotion: {smoothed_audio_emotion} (confidence: {smoothed_audio_score:.2f})")
-                else:
-                    print("[Audio]   Could not detect emotion.")
-                # --- Multimodal matching ---
-                matches = match_multimodal_emotions(video_emotions, audio_emotion_log)
+            while not stop_flag['stop']:
+                time.sleep(2)  # Poll every 2 seconds
+                with video_lock:
+                    v_copy = list(video_emotions)
+                with audio_lock:
+                    a_copy = list(audio_emotion_log)
+                matches = match_multimodal_emotions(v_copy, a_copy)
                 if matches:
-                    print("\n--- Multimodal Matches (real-time) ---")
-                    for m in matches[-5:]:  # Show only the last 5 matches for brevity
+                    print("\n--- Multimodal Matches (real-time, threaded) ---")
+                    for m in matches[-5:]:
                         print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']}) | "
                               f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']}) @ t={m['audio_timestamp']:.3f}")
-                # Exit on 'q'
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
         except KeyboardInterrupt:
             print("Exiting microphone and video emotion detection.")
-        cap.release()
-        cv2.destroyAllWindows()
+            stop_flag['stop'] = True
+        video_thread.join()
+        audio_thread.join()
     else:
         print("Invalid input. Exiting.")
 
