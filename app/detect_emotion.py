@@ -390,7 +390,19 @@ def main(live=True):
                     for m in matches[-5:]:
                         print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']}) | "
                               f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']}) @ t={m['audio_timestamp']:.3f}")
-                    # Consistency/mismatch metric for the most recent match
+                    # Refined windowed consistency metric
+                    window_size = 3
+                    window_matches = matches[-window_size:] if len(matches) >= window_size else matches
+                    consistent_count = 0
+                    for match in window_matches:
+                        if match['facial_emotion'] == match['audio_emotion']:
+                            consistent_count += 1
+                    if window_matches:
+                        consistency_pct = 100.0 * consistent_count / len(window_matches)
+                        print(f"Consistency (last {len(window_matches)}): {consistency_pct:.1f}%")
+                    else:
+                        print("No matches yet.")
+                    # Mismatch indicator for the most recent match
                     latest = matches[-1]
                     facial = latest['facial_emotion']
                     audio = latest['audio_emotion']
