@@ -120,12 +120,14 @@ def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0
                 })
     return matches
 
-def video_processing_loop(video_emotions, video_lock, stop_flag):
+def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event):
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: Cannot access webcam.")
         stop_flag['stop'] = True
         return
+    # Signal that video processing has started
+    video_started_event.set()
     while not stop_flag['stop']:
         ret, frame = cap.read()
         if not ret:
@@ -168,7 +170,9 @@ def video_processing_loop(video_emotions, video_lock, stop_flag):
     cap.release()
     cv2.destroyAllWindows()
 
-def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device):
+def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device, video_started_event):
+    # Wait for video processing to start
+    video_started_event.wait()
     chunk_duration = 5
     smoothing_window = 3
     emotion_window = deque(maxlen=smoothing_window)
@@ -367,9 +371,10 @@ def main(live=True):
         video_lock = threading.Lock()
         audio_lock = threading.Lock()
         stop_flag = {'stop': False}
+        video_started_event = threading.Event()
         # Start threads
-        video_thread = threading.Thread(target=video_processing_loop, args=(video_emotions, video_lock, stop_flag))
-        audio_thread = threading.Thread(target=audio_processing_loop, args=(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device))
+        video_thread = threading.Thread(target=video_processing_loop, args=(video_emotions, video_lock, stop_flag, video_started_event))
+        audio_thread = threading.Thread(target=audio_processing_loop, args=(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device, video_started_event))
         video_thread.start()
         audio_thread.start()
         try:
