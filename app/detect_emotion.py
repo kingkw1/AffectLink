@@ -258,11 +258,11 @@ def main(live=True):
             audio_path = temp_audio.name
         try:
             videoclip = VideoFileClip(video_path)
-            videoclip.audio.write_audiofile(audio_path, fps=16000, nbytes=2, codec='pcm_s16le', verbose=False, logger=None)
+            videoclip.audio.write_audiofile(audio_path, fps=16000, nbytes=2, codec='pcm_s16le')
         except Exception as e:
             print(f"Audio extraction failed: {e}")
             return
-        # Process video frames for facial emotion detection
+        # --- Video frame analysis ---
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print("Error: Cannot open video file.")
@@ -298,41 +298,62 @@ def main(live=True):
                 print(f"Video analysis error: {e}")
         cap.release()
         print("Video file processing complete. Total frames analyzed:", len(video_emotions))
-        # Process extracted audio file for emotions
-        print("Processing extracted audio for emotions...")
+        # --- Audio chunked processing ---
+        print("Processing extracted audio for emotions in chunks...")
+        import math
+        import soundfile as sf
+        chunk_duration = 10  # seconds
         audio_emotion_log = []
-        text = transcribe_audio_whisper(audio_path, whisper_model)
-        if text:
-            text_emotion, text_score = classify_emotion(text, classifier)
-            text_timestamp = time.time()
-            if text_emotion:
+        y, sr = librosa.load(audio_path, sr=16000)
+        total_samples = len(y)
+        chunk_samples = chunk_duration * sr
+        num_chunks = math.ceil(total_samples / chunk_samples)
+        for i in range(num_chunks):
+            start = i * chunk_samples
+            end = min((i + 1) * chunk_samples, total_samples)
+            chunk = y[start:end]
+            # Write chunk to temp file
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_chunk:
+                sf.write(temp_chunk.name, chunk, sr)
+                chunk_path = temp_chunk.name
+            # Transcribe chunk
+            text = transcribe_audio_whisper(chunk_path, whisper_model)
+            text_emotion, text_score, text_timestamp = None, None, None
+            if text and len(text) > 0:
+                # Truncate text to 512 characters for classifier (or split if needed)
+                text = text[:512]
+                text_emotion, text_score = classify_emotion(text, classifier)
+                text_timestamp = time.time()
+                if text_emotion:
+                    audio_emotion_log.append({
+                        'timestamp': text_timestamp,
+                        'modality': 'text',
+                        'emotion': text_emotion,
+                        'confidence': text_score
+                    })
+            # SER on chunk
+            audio_emotion, audio_score, audio_timestamp = None, None, None
+            audio_emotion, audio_score = analyze_audio_emotion(chunk_path, ser_model, ser_processor, ser_label_mapping, device)
+            audio_timestamp = time.time()
+            if audio_emotion:
                 audio_emotion_log.append({
-                    'timestamp': text_timestamp,
-                    'modality': 'text',
-                    'emotion': text_emotion,
-                    'confidence': text_score
+                    'timestamp': audio_timestamp,
+                    'modality': 'audio',
+                    'emotion': audio_emotion,
+                    'confidence': audio_score
                 })
-        audio_emotion, audio_score = analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mapping, device)
-        audio_timestamp = time.time()
-        if audio_emotion:
-            audio_emotion_log.append({
-                'timestamp': audio_timestamp,
-                'modality': 'audio',
-                'emotion': audio_emotion,
-                'confidence': audio_score
-            })
-        print("--- Audio Results ---")
-        if text:
-            print(f"[{text_timestamp:.3f}] [Text]    Detected emotion: {text_emotion} (confidence: {text_score:.2f})")
-        else:
-            print("[Text]    Could not detect emotion.")
-        if audio_emotion:
-            print(f"[{audio_timestamp:.3f}] [Audio]   Detected emotion: {audio_emotion} (confidence: {audio_score:.2f})")
-        else:
-            print("[Audio]   Could not detect emotion.")
-        # Optionally, perform multimodal matching here
-        # matches = match_multimodal_emotions(video_emotions, audio_emotion_log)
-        # print(matches)
+            # Clean up chunk file
+            os.remove(chunk_path)
+            # Print results for this chunk
+            print(f"--- Audio Results (chunk {i+1}/{num_chunks}) ---")
+            if text_emotion and text_timestamp:
+                print(f"[{text_timestamp:.3f}] [Text]    Detected emotion: {text_emotion} (confidence: {text_score:.2f})")
+            else:
+                print("[Text]    Could not detect emotion.")
+            if audio_emotion and audio_timestamp:
+                print(f"[{audio_timestamp:.3f}] [Audio]   Detected emotion: {audio_emotion} (confidence: {audio_score:.2f})")
+            else:
+                print("[Audio]   Could not detect emotion.")
         # Clean up temp audio file
         os.remove(audio_path)
     else:
