@@ -390,6 +390,16 @@ def main(live=True):
                     for m in matches[-5:]:
                         print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']}) | "
                               f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']}) @ t={m['audio_timestamp']:.3f}")
+                    # Consistency/mismatch metric for the most recent match
+                    latest = matches[-1]
+                    facial = latest['facial_emotion']
+                    audio = latest['audio_emotion']
+                    print(f"Dominant Facial Emotion: {facial}")
+                    print(f"Dominant Audio Emotion: {audio}")
+                    if facial == audio:
+                        print("Consistency: Consistent ✅")
+                    else:
+                        print("Consistency: Mismatch ❌")
         except KeyboardInterrupt:
             print("Exiting microphone and video emotion detection.")
             stop_flag['stop'] = True
