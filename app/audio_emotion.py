@@ -86,6 +86,31 @@ def moving_average(scores):
         return 0
     return sum(scores) / len(scores)
 
+def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0):
+    """
+    Match detected facial emotions with detected audio emotions based on timestamp proximity.
+    Args:
+        video_emotions: list of dicts with 'timestamp', 'emotion', 'confidence'
+        audio_emotions: list of dicts with 'timestamp', 'modality', 'emotion', 'confidence'
+        time_threshold: max allowed time difference (seconds) for a match
+    Returns:
+        List of dicts with matched emotion data from both modalities.
+    """
+    matches = []
+    for v in video_emotions:
+        for a in audio_emotions:
+            if abs(v['timestamp'] - a['timestamp']) <= time_threshold:
+                matches.append({
+                    'video_timestamp': v['timestamp'],
+                    'facial_emotion': v['emotion'],
+                    'facial_confidence': v['confidence'],
+                    'audio_timestamp': a['timestamp'],
+                    'audio_modality': a['modality'],
+                    'audio_emotion': a['emotion'],
+                    'audio_confidence': a['confidence']
+                })
+    return matches
+
 # ---------------------------
 # Main script
 # ---------------------------
@@ -158,6 +183,17 @@ def main():
             print("[Audio]   Could not detect emotion.")
         # Optionally, print or save the log for later use
         # print(audio_emotion_log)
+        # Simulate video_emotions for testing (timestamps near audio_emotion_log)
+        now = time.time()
+        video_emotions = [
+            {'timestamp': text_timestamp-0.5, 'emotion': 'neutral', 'confidence': 0.7},
+            {'timestamp': audio_timestamp, 'emotion': 'happy', 'confidence': 0.8}
+        ]
+        print("\n--- Multimodal Matches (simulated video) ---")
+        matches = match_multimodal_emotions(video_emotions, audio_emotion_log)
+        for m in matches:
+            print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']:.2f}) | "
+                  f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']:.2f}) @ t={m['audio_timestamp']:.3f}")
     elif source == '2':
         chunk_duration = 5
         smoothing_window = 3
@@ -166,6 +202,8 @@ def main():
         audio_emotion_window = deque(maxlen=smoothing_window)
         audio_score_window = deque(maxlen=smoothing_window)
         print("Starting live microphone emotion detection. Press Ctrl+C to stop.")
+        # Simulate video_emotions for live mode (append a new entry per chunk)
+        video_emotions = []
         try:
             while True:
                 temp_wav = record_audio_chunk(duration=chunk_duration)
@@ -232,6 +270,20 @@ def main():
                 else:
                     print("[Audio]   Could not detect emotion.")
 
+                # After each chunk, simulate a video emotion with a timestamp near the audio chunk
+                simulated_video_emotion = {
+                    'timestamp': time.time(),
+                    'emotion': 'neutral',  # or random/constant for now
+                    'confidence': 0.75
+                }
+                video_emotions.append(simulated_video_emotion)
+                # Print matches for the most recent video emotion
+                matches = match_multimodal_emotions([simulated_video_emotion], audio_emotion_log)
+                if matches:
+                    print("\n--- Multimodal Matches (simulated video) ---")
+                    for m in matches:
+                        print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']:.2f}) | "
+                              f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']:.2f}) @ t={m['audio_timestamp']:.3f}")
         except KeyboardInterrupt:
             print("Exiting microphone emotion detection.")
     else:
