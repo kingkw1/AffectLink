@@ -213,8 +213,21 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
     while not stop_flag['stop']:
         temp_wav = record_audio_chunk(duration=chunk_duration)
         text = transcribe_audio_whisper(temp_wav, whisper_model)
+        print(f"DEBUG: Whisper transcribed text: '{text}'") # Added for debugging
+
         # Get all text emotion scores
-        text_emotion_scores = classify_emotion_full(text, classifier) if text else []
+        print(f"DEBUG: Text input to emotion classifier: '{text}'") # Added for debugging
+        text_emotion_scores_raw = classifier(text, top_k=None) if text else [] # Get raw output
+        print(f"DEBUG: Raw output from text emotion classifier: {text_emotion_scores_raw}") # Added for debugging
+
+        text_emotion_scores = []
+        if text and text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
+            # The classifier for "j-hartmann/emotion-english-distilroberta-base" returns a list containing a list of dicts
+            if isinstance(text_emotion_scores_raw[0], list):
+                 text_emotion_scores = sorted(text_emotion_scores_raw[0], key=lambda x: x['score'], reverse=True)
+            elif isinstance(text_emotion_scores_raw[0], dict): # Fallback if the structure is flatter
+                 text_emotion_scores = sorted(text_emotion_scores_raw, key=lambda x: x['score'], reverse=True)
+
         if text_emotion_scores:
             top_text = text_emotion_scores[0]
             emotion = top_text['label']
@@ -232,14 +245,16 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
             score_window.append(score)
             smoothed_emotion = max(set(emotion_window), key=emotion_window.count)
             smoothed_score = moving_average([s for e, s in zip(emotion_window, score_window) if e == smoothed_emotion])
+            log_entry_text = {
+                'timestamp': text_timestamp,
+                'modality': 'text',
+                'emotion': smoothed_emotion,
+                'confidence': smoothed_score,
+                'emotion_scores': text_emotion_scores
+            }
+            print(f"DEBUG: Adding to audio_emotion_log (text): {log_entry_text}") # Added for debugging
             with audio_lock:
-                audio_emotion_log.append({
-                    'timestamp': text_timestamp,
-                    'modality': 'text',
-                    'emotion': smoothed_emotion,
-                    'confidence': smoothed_score,
-                    'emotion_scores': text_emotion_scores
-                })
+                audio_emotion_log.append(log_entry_text)
         # Smoothing audio emotions
         if audio_emotion:
             audio_emotion_window.append(audio_emotion)
@@ -434,34 +449,37 @@ def main(live=True):
                 if matches:
                     print("\n--- Multimodal Matches (real-time, threaded) ---")
                     for m in matches[-5:]:
-                        print(f"DEBUG: Current match: {m}") # Added for debugging
-                        print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']}) | "
-                              f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']}) @ t={m['audio_timestamp']:.3f}")
+                        # print(f"DEBUG: Current complete match object m: {m}") # Optional: Full match object debug
+                        print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']:.2f}) | "
+                              f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']:.2f}) @ t={m['audio_timestamp']:.3f}")
                         # Print top 3 video emotion scores
                         print("    Video emotion scores:")
-                        for k, v in sorted(m.get('video_emotion_scores', {}).items(), key=lambda x: x[1], reverse=True)[:3]:
-                            print(f"      {k}: {v:.2f}")
+                        if isinstance(m.get('video_emotion_scores'), dict):
+                            for k, v in sorted(m['video_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
+                                print(f"      {k}: {v:.2f}")
+                        else:
+                            print("      (no video scores found or in unexpected format)")
+
                         # Print top 3 audio emotion scores
                         if m['audio_modality'] == 'audio':
                             print(f"    Audio (audio) emotion scores:")
                             if isinstance(m.get('audio_emotion_scores'), dict):
                                 for k, v in sorted(m['audio_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
                                     print(f"      {k}: {v:.2f}")
-                        elif m['audio_modality'] == 'text':
-                            print(f"DEBUG: Entered 'text' modality block for match with audio_timestamp: {m['audio_timestamp']}") # Added for debugging
-                            print(f"DEBUG: audio_emotion_log at this point: {audio_emotion_log}") # Added for debugging
-                            print(f"    Audio (text) emotion scores:")
-                            # Find the corresponding audio_emotion_log entry for this timestamp and modality
-                            text_scores = None
-                            for a in audio_emotion_log:
-                                if a.get('modality') == 'text' and abs(a['timestamp'] - m['audio_timestamp']) < 1e-3:
-                                    text_scores = a.get('emotion_scores', [])
-                                    break
-                            if text_scores:
-                                for e in text_scores[:3]:
-                                    print(f"      {e['label']}: {e['score']:.2f}")
                             else:
-                                print("      (no scores found)")
+                                print("      (no audio scores found or in unexpected format)")
+                        elif m['audio_modality'] == 'text':
+                            print(f"    Audio (text) emotion scores:")
+                            # print(f"DEBUG: audio_emotion_scores for text modality: {m.get('audio_emotion_scores')}") # Debug specific scores
+                            retrieved_text_scores = m.get('audio_emotion_scores', [])
+                            if isinstance(retrieved_text_scores, list) and retrieved_text_scores:
+                                for score_entry in retrieved_text_scores[:3]: # Iterate through top 3 (already sorted)
+                                    if isinstance(score_entry, dict) and 'label' in score_entry and 'score' in score_entry:
+                                        print(f"      {score_entry['label']}: {score_entry['score']:.2f}")
+                                    else:
+                                        print(f"      (malformed score entry: {score_entry})")
+                            else:
+                                print("      (no text scores found or scores in unexpected format)")
                     # Refined windowed consistency metric
                     window_size = 3
                     window_matches = matches[-window_size:] if len(matches) >= window_size else matches
