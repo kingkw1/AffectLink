@@ -18,6 +18,10 @@ import logging
 import threading
 from moviepy import VideoFileClip
 
+# Constants
+VIDEO_WINDOW_DURATION = 5  # seconds
+AUDIO_WINDOW_DURATION = 5  # seconds
+
 # ---------------------------
 # Helper functions
 # ---------------------------
@@ -375,7 +379,12 @@ def main(live=True):
                     v_copy = list(video_emotions)
                 with audio_lock:
                     a_copy = list(audio_emotion_log)
-                matches = match_multimodal_emotions(v_copy, a_copy)
+
+                current_time = time.time()
+                video_window = [v for v in video_emotions if current_time - v['timestamp'] <= VIDEO_WINDOW_DURATION]
+                audio_window = [a for a in audio_emotion_log if current_time - a['timestamp'] <= AUDIO_WINDOW_DURATION]
+                matches = match_multimodal_emotions(video_window, audio_window)
+                # matches = match_multimodal_emotions(v_copy, a_copy)
                 if matches:
                     print("\n--- Multimodal Matches (real-time, threaded) ---")
                     for m in matches[-5:]:
