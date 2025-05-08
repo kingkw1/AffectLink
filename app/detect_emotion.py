@@ -1,15 +1,14 @@
-import sys
 import os
 import tempfile
 import wave
 from collections import deque
 import time
-
+import math
+import soundfile as sf
 import torch
 import whisper
 from transformers import pipeline, AutoModelForAudioClassification
 import sounddevice as sd
-import numpy as np
 import librosa
 from transformers import AutoFeatureExtractor
 import cv2
@@ -308,8 +307,6 @@ def main(live=True):
         print("Video file processing complete. Total frames analyzed:", len(video_emotions))
         # --- Audio chunked processing ---
         print("Processing extracted audio for emotions in chunks...")
-        import math
-        import soundfile as sf
         chunk_duration = 10  # seconds
         audio_emotion_log = []
         y, sr = librosa.load(audio_path, sr=16000)
