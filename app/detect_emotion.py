@@ -46,6 +46,16 @@ def classify_emotion(text, classifier):
         print(f"Emotion classification error: {e}")
         return None, None
 
+def classify_emotion_full(text, classifier):
+    try:
+        result = classifier(text, top_k=None)[0]  # returns list of dicts
+        # Sort by score descending
+        result_sorted = sorted(result, key=lambda x: x['score'], reverse=True)
+        return result_sorted
+    except Exception as e:
+        print(f"Emotion classification error: {e}")
+        return []
+
 def analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mapping, device):
     """
     Analyze emotion directly from audio using a pre-trained SER model.
@@ -69,6 +79,24 @@ def analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mappin
     except Exception as e:
         print(f"Audio SER error: {e}")
         return None, None
+
+def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, ser_label_mapping, device):
+    try:
+        waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
+        inputs = ser_processor(waveform, sampling_rate=16000, return_tensors="pt")
+        for k in inputs:
+            inputs[k] = inputs[k].to(device)
+        with torch.no_grad():
+            outputs = ser_model(**inputs)
+            scores = torch.nn.functional.softmax(outputs.logits, dim=1)[0]
+            all_scores = {ser_label_mapping[i]: float(scores[i].item()) for i in range(len(scores))}
+            pred_idx = scores.argmax().item()
+            pred_label = ser_label_mapping[pred_idx]
+            pred_score = scores[pred_idx].item()
+        return pred_label, pred_score, all_scores
+    except Exception as e:
+        print(f"Audio SER error: {e}")
+        return None, None, {}
 
 def record_audio_chunk(duration=5, fs=16000):
     """
@@ -112,10 +140,12 @@ def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0
                     'video_timestamp': v['timestamp'],
                     'facial_emotion': v['emotion'],
                     'facial_confidence': v['confidence'],
+                    'video_emotion_scores': v.get('emotion_scores', {}),
                     'audio_timestamp': a['timestamp'],
                     'audio_modality': a['modality'],
                     'audio_emotion': a['emotion'],
-                    'audio_confidence': a['confidence']
+                    'audio_confidence': a['confidence'],
+                    'audio_emotion_scores': a.get('emotion_scores', [])
                 })
     return matches
 
@@ -144,12 +174,14 @@ def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_e
                 if 'dominant_emotion' in face:
                     emo = face['dominant_emotion']
                     confidence = face.get('emotion', {}).get(emo, None)
+                    emotion_scores = face.get('emotion', {})
                     timestamp = time.time()
                     with video_lock:
                         video_emotions.append({
                             'timestamp': timestamp,
                             'emotion': emo,
-                            'confidence': confidence
+                            'confidence': confidence,
+                            'emotion_scores': emotion_scores
                         })
                     # Draw rectangle and overlay text
                     region = face.get('region', {})
@@ -181,15 +213,18 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
     while not stop_flag['stop']:
         temp_wav = record_audio_chunk(duration=chunk_duration)
         text = transcribe_audio_whisper(temp_wav, whisper_model)
-        audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
-        audio_timestamp = time.time()
-        if not text or text.strip() == "":
-            print("No speech detected.")
-            os.unlink(temp_wav)
-            continue
-        print(f"Transcribed: {text}")
-        emotion, score = classify_emotion(text, classifier)
+        # Get all text emotion scores
+        text_emotion_scores = classify_emotion_full(text, classifier) if text else []
+        if text_emotion_scores:
+            top_text = text_emotion_scores[0]
+            emotion = top_text['label']
+            score = top_text['score']
+        else:
+            emotion, score = None, None
         text_timestamp = time.time()
+        # SER all scores
+        audio_emotion, audio_score, audio_emotion_scores = analyze_audio_emotion_full(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
+        audio_timestamp = time.time()
         os.unlink(temp_wav)
         # Smoothing text emotions
         if emotion:
@@ -202,7 +237,8 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     'timestamp': text_timestamp,
                     'modality': 'text',
                     'emotion': smoothed_emotion,
-                    'confidence': smoothed_score
+                    'confidence': smoothed_score,
+                    'emotion_scores': text_emotion_scores
                 })
         # Smoothing audio emotions
         if audio_emotion:
@@ -215,7 +251,8 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     'timestamp': audio_timestamp,
                     'modality': 'audio',
                     'emotion': smoothed_audio_emotion,
-                    'confidence': smoothed_audio_score
+                    'confidence': smoothed_audio_score,
+                    'emotion_scores': audio_emotion_scores
                 })
         print("--- Results ---")
         if emotion:
@@ -323,29 +360,31 @@ def main(live=True):
                 chunk_path = temp_chunk.name
             # Transcribe chunk
             text = transcribe_audio_whisper(chunk_path, whisper_model)
-            text_emotion, text_score, text_timestamp = None, None, None
-            if text and len(text) > 0:
-                # Truncate text to 512 characters for classifier (or split if needed)
-                text = text[:512]
-                text_emotion, text_score = classify_emotion(text, classifier)
-                text_timestamp = time.time()
-                if text_emotion:
-                    audio_emotion_log.append({
-                        'timestamp': text_timestamp,
-                        'modality': 'text',
-                        'emotion': text_emotion,
-                        'confidence': text_score
-                    })
-            # SER on chunk
-            audio_emotion, audio_score, audio_timestamp = None, None, None
-            audio_emotion, audio_score = analyze_audio_emotion(chunk_path, ser_model, ser_processor, ser_label_mapping, device)
+            text_emotion_scores = classify_emotion_full(text, classifier) if text else []
+            if text_emotion_scores:
+                top_text = text_emotion_scores[0]
+                text_emotion = top_text['label']
+                text_score = top_text['score']
+            else:
+                text_emotion, text_score = None, None
+            text_timestamp = time.time()
+            audio_emotion, audio_score, audio_emotion_scores = analyze_audio_emotion_full(chunk_path, ser_model, ser_processor, ser_label_mapping, device)
             audio_timestamp = time.time()
+            if text_emotion:
+                audio_emotion_log.append({
+                    'timestamp': text_timestamp,
+                    'modality': 'text',
+                    'emotion': text_emotion,
+                    'confidence': text_score,
+                    'emotion_scores': text_emotion_scores
+                })
             if audio_emotion:
                 audio_emotion_log.append({
                     'timestamp': audio_timestamp,
                     'modality': 'audio',
                     'emotion': audio_emotion,
-                    'confidence': audio_score
+                    'confidence': audio_score,
+                    'emotion_scores': audio_emotion_scores
                 })
             # Clean up chunk file
             os.remove(chunk_path)
@@ -353,10 +392,16 @@ def main(live=True):
             print(f"--- Audio Results (chunk {i+1}/{num_chunks}) ---")
             if text_emotion and text_timestamp:
                 print(f"[{text_timestamp:.3f}] [Text]    Detected emotion: {text_emotion} (confidence: {text_score:.2f})")
+                print("    Text emotion scores:")
+                for e in text_emotion_scores[:3]:
+                    print(f"      {e['label']}: {e['score']:.2f}")
             else:
                 print("[Text]    Could not detect emotion.")
             if audio_emotion and audio_timestamp:
                 print(f"[{audio_timestamp:.3f}] [Audio]   Detected emotion: {audio_emotion} (confidence: {audio_score:.2f})")
+                print("    Audio SER scores:")
+                for k, v in sorted(audio_emotion_scores.items(), key=lambda x: x[1], reverse=True)[:3]:
+                    print(f"      {k}: {v:.2f}")
             else:
                 print("[Audio]   Could not detect emotion.")
         # Clean up temp audio file
@@ -390,6 +435,18 @@ def main(live=True):
                     for m in matches[-5:]:
                         print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']}) | "
                               f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']}) @ t={m['audio_timestamp']:.3f}")
+                        # Print top 3 video emotion scores
+                        print("    Video emotion scores:")
+                        for k, v in sorted(m.get('video_emotion_scores', {}).items(), key=lambda x: x[1], reverse=True)[:3]:
+                            print(f"      {k}: {v:.2f}")
+                        # Print top 3 audio emotion scores
+                        print(f"    Audio ({m['audio_modality']}) emotion scores:")
+                        if isinstance(m.get('audio_emotion_scores'), dict):
+                            for k, v in sorted(m['audio_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
+                                print(f"      {k}: {v:.2f}")
+                        elif isinstance(m.get('audio_emotion_scores'), list):
+                            for e in m['audio_emotion_scores'][:3]:
+                                print(f"      {e['label']}: {e['score']:.2f}")
                     # Refined windowed consistency metric
                     window_size = 3
                     window_matches = matches[-window_size:] if len(matches) >= window_size else matches
