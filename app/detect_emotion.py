@@ -189,7 +189,7 @@ def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_e
                     cv2.rectangle(frame, (x,y), (x+w, y+h), (0,255,0), 2)
                     text_y = y-10 if y-10>10 else y+h+20
                     cv2.putText(frame, f"{emo}", (x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-                    print(f"[Video {timestamp:.3f}] Detected emotion: {emo} (confidence: {confidence})")
+                    # print(f"[Video {timestamp:.3f}] Detected emotion: {emo} (confidence: {confidence})")
                 else:
                     print("No face detected or emotion data unavailable.")
         except Exception as e:
@@ -429,10 +429,12 @@ def main(live=True):
                     current_time_audio = time.time() # Use a separate timestamp if needed for strict independence
                     audio_window = [a for a in audio_emotion_log if current_time_audio - a['timestamp'] <= AUDIO_WINDOW_DURATION]
 
+                print(f"DEBUG: audio_emotion_log content: {audio_emotion_log}") # Added for debugging
                 matches = match_multimodal_emotions(video_window, audio_window)
                 if matches:
                     print("\n--- Multimodal Matches (real-time, threaded) ---")
                     for m in matches[-5:]:
+                        print(f"DEBUG: Current match: {m}") # Added for debugging
                         print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']}) | "
                               f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']}) @ t={m['audio_timestamp']:.3f}")
                         # Print top 3 video emotion scores
@@ -440,13 +442,26 @@ def main(live=True):
                         for k, v in sorted(m.get('video_emotion_scores', {}).items(), key=lambda x: x[1], reverse=True)[:3]:
                             print(f"      {k}: {v:.2f}")
                         # Print top 3 audio emotion scores
-                        print(f"    Audio ({m['audio_modality']}) emotion scores:")
-                        if isinstance(m.get('audio_emotion_scores'), dict):
-                            for k, v in sorted(m['audio_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
-                                print(f"      {k}: {v:.2f}")
-                        elif isinstance(m.get('audio_emotion_scores'), list):
-                            for e in m['audio_emotion_scores'][:3]:
-                                print(f"      {e['label']}: {e['score']:.2f}")
+                        if m['audio_modality'] == 'audio':
+                            print(f"    Audio (audio) emotion scores:")
+                            if isinstance(m.get('audio_emotion_scores'), dict):
+                                for k, v in sorted(m['audio_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
+                                    print(f"      {k}: {v:.2f}")
+                        elif m['audio_modality'] == 'text':
+                            print(f"DEBUG: Entered 'text' modality block for match with audio_timestamp: {m['audio_timestamp']}") # Added for debugging
+                            print(f"DEBUG: audio_emotion_log at this point: {audio_emotion_log}") # Added for debugging
+                            print(f"    Audio (text) emotion scores:")
+                            # Find the corresponding audio_emotion_log entry for this timestamp and modality
+                            text_scores = None
+                            for a in audio_emotion_log:
+                                if a.get('modality') == 'text' and abs(a['timestamp'] - m['audio_timestamp']) < 1e-3:
+                                    text_scores = a.get('emotion_scores', [])
+                                    break
+                            if text_scores:
+                                for e in text_scores[:3]:
+                                    print(f"      {e['label']}: {e['score']:.2f}")
+                            else:
+                                print("      (no scores found)")
                     # Refined windowed consistency metric
                     window_size = 3
                     window_matches = matches[-window_size:] if len(matches) >= window_size else matches
@@ -465,7 +480,7 @@ def main(live=True):
                     audio = latest['audio_emotion']
                     print(f"Dominant Facial Emotion: {facial}")
                     print(f"Dominant Audio Emotion: {audio}")
-                    if facial == audio:
+                    if (facial == audio):
                         print("Consistency: Consistent ✅")
                     else:
                         print("Consistency: Mismatch ❌")
