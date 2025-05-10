@@ -25,6 +25,33 @@ SER_MODEL_ID = "superb/hubert-large-superb-er"
 TEXT_CLASSIFIER_MODEL_ID = "j-hartmann/emotion-english-distilroberta-base"
 # FER model ID for DeepFace
 
+ser_to_unified = {
+    "neu": "neutral",
+    "hap": "happy",
+    "sad": "sad",
+    "ang": "angry",
+}
+
+text_to_unified = {
+    "neutral": "neutral",
+    "joy": "happy",
+    "sadness": "sad",
+    "anger": "angry",
+    "disgust": "disgust",  
+    "fear": "fear",
+    "surprise": "surprise"
+}
+
+facial_to_unified = {
+    "neutral": "neutral",
+    "happy": "happy",
+    "sad": "sad",
+    "angry": "angry",
+    "fear": "fear",
+    "disgust": "disgust",
+    "surprise": "surprise"
+}
+
 # ---------------------------
 # Helper functions
 # ---------------------------
