@@ -25,14 +25,17 @@ SER_MODEL_ID = "superb/hubert-large-superb-er"
 TEXT_CLASSIFIER_MODEL_ID = "j-hartmann/emotion-english-distilroberta-base"
 # FER model ID for DeepFace
 
-ser_to_unified = {
+# Emotion categories for unified mapping
+UNIFIED_EMOTIONS = ['neutral', 'happy', 'sad', 'angry']
+
+SER_TO_UNIFIED = {
     "neu": "neutral",
     "hap": "happy",
     "sad": "sad",
     "ang": "angry",
 }
 
-text_to_unified = {
+TEXT_TO_UNIFIED = {
     "neutral": "neutral",
     "joy": "happy",
     "sadness": "sad",
@@ -42,7 +45,7 @@ text_to_unified = {
     "surprise": "surprise"
 }
 
-facial_to_unified = {
+FACIAL_TO_UNIFIED = {
     "neutral": "neutral",
     "happy": "happy",
     "sad": "sad",
@@ -188,47 +191,110 @@ def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_e
         return
     # Signal that video processing has started
     video_started_event.set()
+    
+    # For 5-second downsampling
+    window_start_time = time.time()
+    frame_emotions = []
+    
     while not stop_flag['stop']:
         ret, frame = cap.read()
         if not ret:
             print("Error: Failed to read video frame.")
             break
+        
         try:
+            # Process this frame with DeepFace
             results = DeepFace.analyze(
                 img_path=frame,
                 actions=['emotion'],
                 enforce_detection=False,
                 detector_backend='opencv'
             )
+            
             faces = results if isinstance(results, list) else [results]
+            
             for face in faces:
                 if 'dominant_emotion' in face:
+                    current_time = time.time()
                     emo = face['dominant_emotion']
                     confidence = face.get('emotion', {}).get(emo, None)
                     emotion_scores = face.get('emotion', {})
-                    timestamp = time.time()
-                    with video_lock:
-                        video_emotions.append({
-                            'timestamp': timestamp,
-                            'emotion': emo,
-                            'confidence': confidence,
-                            'emotion_scores': emotion_scores
-                        })
+                    
+                    # Store this frame's emotion data for the current window
+                    frame_emotions.append({
+                        'timestamp': current_time,
+                        'emotion': emo,
+                        'confidence': confidence,
+                        'emotion_scores': emotion_scores
+                    })
+                    
                     # Draw rectangle and overlay text
                     region = face.get('region', {})
                     x, y, w, h = region.get('x',0), region.get('y',0), region.get('w',0), region.get('h',0)
                     cv2.rectangle(frame, (x,y), (x+w, y+h), (0,255,0), 2)
                     text_y = y-10 if y-10>10 else y+h+20
                     cv2.putText(frame, f"{emo}", (x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-                    # print(f"[Video {timestamp:.3f}] Detected emotion: {emo} (confidence: {confidence})")
                 else:
                     print("No face detected or emotion data unavailable.")
+                    
+            # Check if we've reached the end of a 5-second window
+            current_time = time.time()
+            if current_time - window_start_time >= VIDEO_WINDOW_DURATION and frame_emotions:
+                # Calculate average scores for each emotion category
+                unified_emotion_scores = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
+                count = 0
+                
+                for frame_data in frame_emotions:
+                    raw_scores = frame_data.get('emotion_scores', {})
+                    # Map DeepFace emotions to our unified set and accumulate scores
+                    if 'neutral' in raw_scores:
+                        unified_emotion_scores['neutral'] += raw_scores.get('neutral', 0)
+                    if 'happy' in raw_scores:
+                        unified_emotion_scores['happy'] += raw_scores.get('happy', 0)
+                    if 'sad' in raw_scores:
+                        unified_emotion_scores['sad'] += raw_scores.get('sad', 0)
+                    if 'angry' in raw_scores:
+                        unified_emotion_scores['angry'] += raw_scores.get('angry', 0)
+                    count += 1
+                
+                if count > 0:
+                    # Average the scores
+                    for emotion in unified_emotion_scores:
+                        unified_emotion_scores[emotion] /= count
+                    
+                    # Find the dominant emotion from the averaged scores
+                    dominant_emotion = max(unified_emotion_scores.items(), key=lambda x: x[1])
+                    dominant_label = dominant_emotion[0]
+                    dominant_score = dominant_emotion[1]
+                    
+                    # Create the aggregated video emotion entry
+                    aggregated_entry = {
+                        'timestamp': current_time,  # End of the 5-second window
+                        'emotion': dominant_label,
+                        'confidence': dominant_score,
+                        'emotion_scores': unified_emotion_scores
+                    }
+                    
+                    # Add to video emotions log with lock
+                    with video_lock:
+                        video_emotions.append(aggregated_entry)
+                    
+                    print(f"[Video {current_time:.3f}] 5-second window: Dominant emotion: {dominant_label} (confidence: {dominant_score:.2f})")
+                    for emotion, score in sorted(unified_emotion_scores.items(), key=lambda x: x[1], reverse=True):
+                        print(f"  {emotion}: {score:.2f}")
+                
+                # Reset for next window
+                window_start_time = current_time
+                frame_emotions = []
+                
         except Exception as e:
             print(f"Video analysis error: {e}")
+            
         cv2.imshow('Real-time Video Emotion Detection', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             stop_flag['stop'] = True
             break
+            
     cap.release()
     cv2.destroyAllWindows()
 
@@ -352,12 +418,25 @@ def main(live=True):
         if not cap.isOpened():
             print("Error: Cannot open video file.")
             return
+        
+        # Initialize variables for 5-second downsampling
         video_emotions = []
-        print("Processing video file for facial emotions...")
+        frame_emotions = []
+        window_start_time = time.time()
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = 0
+        
+        print("Processing video file for facial emotions with 5-second downsampling...")
+        
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
+                
+            # Calculate timestamp based on frame count and FPS
+            timestamp = window_start_time + (frame_count / fps)
+            frame_count += 1
+            
             try:
                 results = DeepFace.analyze(
                     img_path=frame,
@@ -370,19 +449,69 @@ def main(live=True):
                     if 'dominant_emotion' in face:
                         emo = face['dominant_emotion']
                         confidence = face.get('emotion', {}).get(emo, None)
-                        timestamp = time.time()
-                        video_emotions.append({
+                        emotion_scores = face.get('emotion', {})
+                        
+                        # Store this frame's emotion data for current window
+                        frame_emotions.append({
                             'timestamp': timestamp,
                             'emotion': emo,
-                            'confidence': confidence
+                            'confidence': confidence,
+                            'emotion_scores': emotion_scores
                         })
-                        print(f"[Video {timestamp:.3f}] Detected emotion: {emo} (confidence: {confidence})")
                     else:
                         print("No face detected or emotion data unavailable.")
             except Exception as e:
                 print(f"Video analysis error: {e}")
+                
+            # Check if we've processed enough frames for a 5-second window
+            if timestamp - window_start_time >= VIDEO_WINDOW_DURATION and frame_emotions:
+                # Calculate average scores for each emotion category
+                unified_emotion_scores = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
+                count = 0
+                
+                for frame_data in frame_emotions:
+                    raw_scores = frame_data.get('emotion_scores', {})
+                    # Map DeepFace emotions to our unified set and accumulate scores
+                    if 'neutral' in raw_scores:
+                        unified_emotion_scores['neutral'] += raw_scores.get('neutral', 0)
+                    if 'happy' in raw_scores:
+                        unified_emotion_scores['happy'] += raw_scores.get('happy', 0)
+                    if 'sad' in raw_scores:
+                        unified_emotion_scores['sad'] += raw_scores.get('sad', 0)
+                    if 'angry' in raw_scores:
+                        unified_emotion_scores['angry'] += raw_scores.get('angry', 0)
+                    count += 1
+                
+                if count > 0:
+                    # Average the scores
+                    for emotion in unified_emotion_scores:
+                        unified_emotion_scores[emotion] /= count
+                    
+                    # Find the dominant emotion from the averaged scores
+                    dominant_emotion = max(unified_emotion_scores.items(), key=lambda x: x[1])
+                    dominant_label = dominant_emotion[0]
+                    dominant_score = dominant_emotion[1]
+                    
+                    # Create the aggregated video emotion entry
+                    aggregated_entry = {
+                        'timestamp': timestamp,  # End of the 5-second window
+                        'emotion': dominant_label,
+                        'confidence': dominant_score,
+                        'emotion_scores': unified_emotion_scores
+                    }
+                    
+                    video_emotions.append(aggregated_entry)
+                    
+                    print(f"[Video {timestamp:.3f}] 5-second window: Dominant emotion: {dominant_label} (confidence: {dominant_score:.2f})")
+                    for emotion, score in sorted(unified_emotion_scores.items(), key=lambda x: x[1], reverse=True):
+                        print(f"  {emotion}: {score:.2f}")
+                
+                # Reset for next window
+                window_start_time = timestamp
+                frame_emotions = []
+                
         cap.release()
-        print("Video file processing complete. Total frames analyzed:", len(video_emotions))
+        print("Video file processing complete. Total 5-second windows analyzed:", len(video_emotions))
         # --- Audio chunked processing ---
         print("Processing extracted audio for emotions in chunks...")
         chunk_duration = 10  # seconds
