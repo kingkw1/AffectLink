@@ -366,10 +366,6 @@ def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_e
                     # Add to video emotions log with lock
                     with video_lock:
                         video_emotions.append(aggregated_entry)
-                    
-                    print(f"[Video {current_time:.3f}] 5-second window: Dominant emotion: {dominant_label} (confidence: {dominant_score:.2f})")
-                    for emotion, score in sorted(unified_emotion_scores.items(), key=lambda x: x[1], reverse=True):
-                        print(f"  {emotion}: {score:.2f}")
                 
                 # Reset for next window
                 window_start_time = current_time
@@ -700,22 +696,7 @@ def main(live=True):
                 })
             # Clean up chunk file
             os.remove(chunk_path)
-            # Print results for this chunk
-            print(f"--- Audio Results (chunk {i+1}/{num_chunks}) ---")
-            if text_emotion and text_timestamp:
-                print(f"[{text_timestamp:.3f}] [Text]    Detected emotion: {text_emotion} (confidence: {text_score:.2f})")
-                print("    Text emotion scores:")
-                for e in text_emotion_scores[:3]:
-                    print(f"      {e['label']}: {e['score']:.2f}")
-            else:
-                print("[Text]    Could not detect emotion.")
-            if audio_emotion and audio_timestamp:
-                print(f"[{audio_timestamp:.3f}] [Audio]   Detected emotion: {audio_emotion} (confidence: {audio_score:.2f})")
-                print("    Audio SER scores:")
-                for k, v in sorted(audio_emotion_scores.items(), key=lambda x: x[1], reverse=True)[:3]:
-                    print(f"      {k}: {v:.2f}")
-            else:
-                print("[Audio]   Could not detect emotion.")
+
         # Clean up temp audio file
         os.remove(audio_path)
     else:
@@ -745,8 +726,6 @@ def main(live=True):
                 if matches:
                     print("\n--- Multimodal Matches (real-time, threaded) ---")
                     for m in matches[-5:]:
-                        print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']:.2f}) | "
-                              f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']:.2f}) @ t={m['audio_timestamp']:.3f}")
                         
                         # Print cosine similarity
                         print(f"    Cosine Similarity (aggregate): {m['cosine_similarity']:.3f}")
@@ -760,34 +739,6 @@ def main(live=True):
                                 print(f"      Video-Audio Similarity: {ps['video_audio']:.3f}")
                             if ps.get('text_audio') is not None:
                                 print(f"      Text-Audio Similarity: {ps['text_audio']:.3f}")
-                        
-                        # Print top 3 video emotion scores
-                        print("    Video emotion scores:")
-                        if isinstance(m.get('video_emotion_scores'), dict):
-                            for k, v in sorted(m['video_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
-                                print(f"      {k}: {v:.2f}")
-                        else:
-                            print("      (no video scores found or in unexpected format)")
-
-                        # Print top 3 audio emotion scores
-                        if m['audio_modality'] == 'audio':
-                            print(f"    Audio (audio) emotion scores:")
-                            if isinstance(m.get('audio_emotion_scores'), dict):
-                                for k, v in sorted(m['audio_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
-                                    print(f"      {k}: {v:.2f}")
-                            else:
-                                print("      (no audio scores found or in unexpected format)")
-                        elif m['audio_modality'] == 'text':
-                            print(f"    Audio (text) emotion scores:")
-                            retrieved_text_scores = m.get('audio_emotion_scores', [])
-                            if isinstance(retrieved_text_scores, list) and retrieved_text_scores:
-                                for score_entry in retrieved_text_scores[:3]: # Iterate through top 3 (already sorted)
-                                    if isinstance(score_entry, dict) and 'label' in score_entry and 'score' in score_entry:
-                                        print(f"      {score_entry['label']}: {score_entry['score']:.2f}")
-                                    else:
-                                        print(f"      (malformed score entry: {score_entry})")
-                            else:
-                                print("      (no text scores found or scores in unexpected format)")
                                 
                     # Calculate average cosine similarity for recent matches
                     window_size = 3
@@ -808,10 +759,6 @@ def main(live=True):
                         
                     # Mismatch indicator for the most recent match
                     latest = matches[-1]
-                    facial = latest['facial_emotion']
-                    audio = latest['audio_emotion'] 
-                    print(f"Dominant Facial Emotion: {facial}")
-                    print(f"Dominant Audio Emotion: {audio}")
                     
                     # Consistency indicator
                     cosine_sim = latest['cosine_similarity']
