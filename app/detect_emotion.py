@@ -16,43 +16,45 @@ from deepface import DeepFace
 import logging
 import threading
 from moviepy import VideoFileClip
+import numpy as np
 
 # Constants
 VIDEO_WINDOW_DURATION = 5  # seconds
 AUDIO_WINDOW_DURATION = 5  # seconds
 
-SER_MODEL_ID = "superb/hubert-large-superb-er"
+# Model IDs
 TEXT_CLASSIFIER_MODEL_ID = "j-hartmann/emotion-english-distilroberta-base"
-# FER model ID for DeepFace
+SER_MODEL_ID = "superb/hubert-large-superb-er"
 
 # Emotion categories for unified mapping
 UNIFIED_EMOTIONS = ['neutral', 'happy', 'sad', 'angry']
 
-SER_TO_UNIFIED = {
-    "neu": "neutral",
-    "hap": "happy",
-    "sad": "sad",
-    "ang": "angry",
+# Emotion mapping dictionaries
+TEXT_TO_UNIFIED = {
+    'neutral': 'neutral',
+    'joy': 'happy',
+    'sadness': 'sad',
+    'anger': 'angry',
+    'fear': None,  # These emotions don't map to our unified set
+    'surprise': None,
+    'disgust': None
 }
 
-TEXT_TO_UNIFIED = {
-    "neutral": "neutral",
-    "joy": "happy",
-    "sadness": "sad",
-    "anger": "angry",
-    "disgust": "disgust",  
-    "fear": "fear",
-    "surprise": "surprise"
+SER_TO_UNIFIED = {
+    'neu': 'neutral',
+    'hap': 'happy',
+    'sad': 'sad',
+    'ang': 'angry'
 }
 
 FACIAL_TO_UNIFIED = {
-    "neutral": "neutral",
-    "happy": "happy",
-    "sad": "sad",
-    "angry": "angry",
-    "fear": "fear",
-    "disgust": "disgust",
-    "surprise": "surprise"
+    'neutral': 'neutral',
+    'happy': 'happy',
+    'sad': 'sad', 
+    'angry': 'angry',
+    'fear': None,
+    'surprise': None,
+    'disgust': None
 }
 
 # ---------------------------
@@ -159,6 +161,8 @@ def moving_average(scores):
 def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0):
     """
     Match detected facial emotions with detected audio emotions based on timestamp proximity.
+    Calculates cosine similarity between emotion vectors for better consistency measurement.
+    
     Args:
         video_emotions: list of dicts with 'timestamp', 'emotion', 'confidence'
         audio_emotions: list of dicts with 'timestamp', 'modality', 'emotion', 'confidence'
@@ -167,20 +171,104 @@ def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0
         List of dicts with matched emotion data from both modalities.
     """
     matches = []
+    
+    # Group audio modalities by timestamp to find text and audio pairs
+    audio_by_timestamp = {}
+    for a in audio_emotions:
+        timestamp = a['timestamp']
+        if timestamp not in audio_by_timestamp:
+            audio_by_timestamp[timestamp] = []
+        audio_by_timestamp[timestamp].append(a)
+        
     for v in video_emotions:
-        for a in audio_emotions:
-            if abs(v['timestamp'] - a['timestamp']) <= time_threshold:
-                matches.append({
-                    'video_timestamp': v['timestamp'],
-                    'facial_emotion': v['emotion'],
-                    'facial_confidence': v['confidence'],
-                    'video_emotion_scores': v.get('emotion_scores', {}),
-                    'audio_timestamp': a['timestamp'],
-                    'audio_modality': a['modality'],
-                    'audio_emotion': a['emotion'],
-                    'audio_confidence': a['confidence'],
-                    'audio_emotion_scores': a.get('emotion_scores', [])
+        v_timestamp = v['timestamp']
+        
+        # Find matching audio entries (both text and SER) near this video timestamp
+        matching_timestamps = [ts for ts in audio_by_timestamp.keys() if abs(v_timestamp - ts) <= time_threshold]
+        
+        for ts in matching_timestamps:
+            entries = audio_by_timestamp[ts]
+            
+            # Extract text and audio modality entries
+            text_entry = next((e for e in entries if e['modality'] == 'text'), None)
+            audio_entry = next((e for e in entries if e['modality'] == 'audio'), None)
+            
+            # Calculate video vector once
+            video_vector = create_unified_emotion_vector(v.get('emotion_scores', {}), FACIAL_TO_UNIFIED)
+            
+            # Calculate text and audio vectors if available
+            text_vector = None
+            if text_entry:
+                text_vector = create_unified_emotion_vector(text_entry.get('emotion_scores', []), TEXT_TO_UNIFIED)
+                
+            audio_vector = None
+            if audio_entry:
+                audio_vector = create_unified_emotion_vector(audio_entry.get('emotion_scores', {}), SER_TO_UNIFIED)
+            
+            # Calculate pairwise similarities
+            video_text_sim = calculate_cosine_similarity(video_vector, text_vector) if text_vector is not None else None
+            video_audio_sim = calculate_cosine_similarity(video_vector, audio_vector) if audio_vector is not None else None
+            text_audio_sim = calculate_cosine_similarity(text_vector, audio_vector) if text_vector is not None and audio_vector is not None else None
+            
+            # Calculate aggregate similarity
+            cosine_similarities = [s for s in [video_text_sim, video_audio_sim, text_audio_sim] if s is not None]
+            aggregate_similarity = sum(cosine_similarities) / len(cosine_similarities) if cosine_similarities else 0
+            
+            # Create match entries for each modality pair
+            match_data = {
+                'video_timestamp': v_timestamp,
+                'facial_emotion': v['emotion'],
+                'facial_confidence': v['confidence'],
+                'video_emotion_scores': v.get('emotion_scores', {}),
+                'video_emotion_vector': video_vector,
+                'cosine_similarity': aggregate_similarity,
+                'pairwise_similarities': {
+                    'video_text': video_text_sim,
+                    'video_audio': video_audio_sim, 
+                    'text_audio': text_audio_sim
+                }
+            }
+            
+            # Add text data if available
+            if text_entry:
+                match_data.update({
+                    'text_timestamp': text_entry['timestamp'],
+                    'text_emotion': text_entry['emotion'],
+                    'text_confidence': text_entry['confidence'],
+                    'text_emotion_scores': text_entry.get('emotion_scores', []),
+                    'text_emotion_vector': text_vector
                 })
+            
+            # Add audio data if available
+            if audio_entry:
+                match_data.update({
+                    'audio_timestamp': audio_entry['timestamp'],
+                    'audio_emotion': audio_entry['emotion'],
+                    'audio_confidence': audio_entry['confidence'],
+                    'audio_emotion_scores': audio_entry.get('emotion_scores', {}),
+                    'audio_emotion_vector': audio_vector
+                })
+                
+            # For compatibility with existing code, keep the original format
+            if text_entry:
+                match_data.update({
+                    'audio_timestamp': text_entry['timestamp'],
+                    'audio_modality': 'text',
+                    'audio_emotion': text_entry['emotion'],
+                    'audio_confidence': text_entry['confidence'],
+                    'audio_emotion_scores': text_entry.get('emotion_scores', []),
+                })
+            elif audio_entry:
+                match_data.update({
+                    'audio_timestamp': audio_entry['timestamp'],
+                    'audio_modality': 'audio',
+                    'audio_emotion': audio_entry['emotion'],
+                    'audio_confidence': audio_entry['confidence'],
+                    'audio_emotion_scores': audio_entry.get('emotion_scores', {}),
+                })
+                
+            matches.append(match_data)
+    
     return matches
 
 def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event):
@@ -362,15 +450,73 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     'confidence': smoothed_audio_score,
                     'emotion_scores': audio_emotion_scores
                 })
-        print("--- Results ---")
-        if emotion:
-            print(f"[{text_timestamp:.3f}] [Text]    Smoothed emotion: {smoothed_emotion} (confidence: {smoothed_score:.2f})")
-        else:
-            print("[Text]    Could not detect emotion.")
-        if audio_emotion:
-            print(f"[{audio_timestamp:.3f}] [Audio]   Smoothed emotion: {smoothed_audio_emotion} (confidence: {smoothed_audio_score:.2f})")
-        else:
-            print("[Audio]   Could not detect emotion.")
+
+def calculate_cosine_similarity(vector_a, vector_b):
+    """
+    Calculate the cosine similarity between two vectors.
+    
+    Args:
+        vector_a: First vector as a numpy array
+        vector_b: Second vector as a numpy array
+        
+    Returns:
+        Cosine similarity value between -1 and 1
+    """
+    # Ensure vectors are numpy arrays
+    vector_a = np.array(vector_a)
+    vector_b = np.array(vector_b)
+    
+    # Calculate dot product
+    dot_product = np.dot(vector_a, vector_b)
+    
+    # Calculate magnitudes
+    magnitude_a = np.sqrt(np.sum(vector_a**2))
+    magnitude_b = np.sqrt(np.sum(vector_b**2))
+    
+    # Avoid division by zero
+    if magnitude_a == 0 or magnitude_b == 0:
+        return 0.0
+    
+    # Calculate cosine similarity
+    cosine_similarity = dot_product / (magnitude_a * magnitude_b)
+    return cosine_similarity
+
+def create_unified_emotion_vector(emotion_scores, mapping_dict):
+    """
+    Create a vector representing emotion scores in the unified emotion space.
+    
+    Args:
+        emotion_scores: Dictionary or list of dicts with emotion scores
+        mapping_dict: Dictionary mapping source emotions to unified emotions
+        
+    Returns:
+        List with scores for each unified emotion in the order of UNIFIED_EMOTIONS
+    """
+    # Initialize the unified vector with zeros
+    unified_vector = [0.0] * len(UNIFIED_EMOTIONS)
+    
+    # Handle different input formats
+    if isinstance(emotion_scores, dict):
+        # Direct dictionary of emotion scores
+        for emotion, score in emotion_scores.items():
+            if emotion in mapping_dict and mapping_dict[emotion] is not None:
+                unified_emotion = mapping_dict[emotion]
+                if unified_emotion in UNIFIED_EMOTIONS:
+                    idx = UNIFIED_EMOTIONS.index(unified_emotion)
+                    unified_vector[idx] = score
+    elif isinstance(emotion_scores, list):
+        # List of emotion score dictionaries (from text classifier)
+        for item in emotion_scores:
+            if isinstance(item, dict) and 'label' in item and 'score' in item:
+                emotion = item['label']
+                score = item['score']
+                if emotion in mapping_dict and mapping_dict[emotion] is not None:
+                    unified_emotion = mapping_dict[emotion]
+                    if unified_emotion in UNIFIED_EMOTIONS:
+                        idx = UNIFIED_EMOTIONS.index(unified_emotion)
+                        unified_vector[idx] = score
+    
+    return unified_vector
 
 # ---------------------------
 # Main script
@@ -501,10 +647,6 @@ def main(live=True):
                     }
                     
                     video_emotions.append(aggregated_entry)
-                    
-                    print(f"[Video {timestamp:.3f}] 5-second window: Dominant emotion: {dominant_label} (confidence: {dominant_score:.2f})")
-                    for emotion, score in sorted(unified_emotion_scores.items(), key=lambda x: x[1], reverse=True):
-                        print(f"  {emotion}: {score:.2f}")
                 
                 # Reset for next window
                 window_start_time = timestamp
@@ -603,9 +745,22 @@ def main(live=True):
                 if matches:
                     print("\n--- Multimodal Matches (real-time, threaded) ---")
                     for m in matches[-5:]:
-                        # print(f"DEBUG: Current complete match object m: {m}") # Optional: Full match object debug
                         print(f"[t={m['video_timestamp']:.3f}] Video: {m['facial_emotion']} ({m['facial_confidence']:.2f}) | "
                               f"Audio({m['audio_modality']}): {m['audio_emotion']} ({m['audio_confidence']:.2f}) @ t={m['audio_timestamp']:.3f}")
+                        
+                        # Print cosine similarity
+                        print(f"    Cosine Similarity (aggregate): {m['cosine_similarity']:.3f}")
+                        
+                        # Print detailed pairwise similarities
+                        if 'pairwise_similarities' in m:
+                            ps = m['pairwise_similarities']
+                            if ps.get('video_text') is not None:
+                                print(f"      Video-Text Similarity: {ps['video_text']:.3f}")
+                            if ps.get('video_audio') is not None:
+                                print(f"      Video-Audio Similarity: {ps['video_audio']:.3f}")
+                            if ps.get('text_audio') is not None:
+                                print(f"      Text-Audio Similarity: {ps['text_audio']:.3f}")
+                        
                         # Print top 3 video emotion scores
                         print("    Video emotion scores:")
                         if isinstance(m.get('video_emotion_scores'), dict):
@@ -624,7 +779,6 @@ def main(live=True):
                                 print("      (no audio scores found or in unexpected format)")
                         elif m['audio_modality'] == 'text':
                             print(f"    Audio (text) emotion scores:")
-                            # print(f"DEBUG: audio_emotion_scores for text modality: {m.get('audio_emotion_scores')}") # Debug specific scores
                             retrieved_text_scores = m.get('audio_emotion_scores', [])
                             if isinstance(retrieved_text_scores, list) and retrieved_text_scores:
                                 for score_entry in retrieved_text_scores[:3]: # Iterate through top 3 (already sorted)
@@ -634,28 +788,43 @@ def main(live=True):
                                         print(f"      (malformed score entry: {score_entry})")
                             else:
                                 print("      (no text scores found or scores in unexpected format)")
-                    # Refined windowed consistency metric
+                                
+                    # Calculate average cosine similarity for recent matches
                     window_size = 3
                     window_matches = matches[-window_size:] if len(matches) >= window_size else matches
+                    avg_cosine_sim = sum(match['cosine_similarity'] for match in window_matches) / len(window_matches) if window_matches else 0
+                    print(f"Average Cosine Similarity (last {len(window_matches)}): {avg_cosine_sim:.3f}")
+                    
+                    # Refined windowed consistency metric
                     consistent_count = 0
                     for match in window_matches:
                         if match['facial_emotion'] == match['audio_emotion']:
                             consistent_count += 1
                     if window_matches:
                         consistency_pct = 100.0 * consistent_count / len(window_matches)
-                        print(f"Consistency (last {len(window_matches)}): {consistency_pct:.1f}%")
+                        print(f"Label Consistency (last {len(window_matches)}): {consistency_pct:.1f}%")
                     else:
                         print("No matches yet.")
+                        
                     # Mismatch indicator for the most recent match
                     latest = matches[-1]
                     facial = latest['facial_emotion']
-                    audio = latest['audio_emotion']
+                    audio = latest['audio_emotion'] 
                     print(f"Dominant Facial Emotion: {facial}")
                     print(f"Dominant Audio Emotion: {audio}")
-                    if (facial == audio):
-                        print("Consistency: Consistent ✅")
+                    
+                    # Consistency indicator
+                    cosine_sim = latest['cosine_similarity']
+                    if cosine_sim >= 0.8:
+                        consistency_level = "High Consistency ✅✅"
+                    elif cosine_sim >= 0.6:
+                        consistency_level = "Moderate Consistency ✅"
+                    elif cosine_sim >= 0.3:
+                        consistency_level = "Low Consistency ⚠️"
                     else:
-                        print("Consistency: Mismatch ❌")
+                        consistency_level = "Inconsistent ❌"
+                    
+                    print(f"Cosine Similarity: {cosine_sim:.3f} - {consistency_level}")
         except KeyboardInterrupt:
             print("Exiting microphone and video emotion detection.")
             stop_flag['stop'] = True
