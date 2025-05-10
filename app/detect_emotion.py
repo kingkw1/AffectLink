@@ -18,6 +18,9 @@ import threading
 from moviepy import VideoFileClip
 import numpy as np
 
+# Output verbosity control
+VERBOSE_OUTPUT = False
+
 # Constants
 VIDEO_WINDOW_DURATION = 5  # seconds
 AUDIO_WINDOW_DURATION = 5  # seconds
@@ -139,7 +142,6 @@ def record_audio_chunk(duration=5, fs=16000):
     Record audio from the microphone for a given duration (in seconds).
     Returns the path to a temporary WAV file.
     """
-    print(f"Recording {duration} seconds of audio...")
     audio = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
     sd.wait()
     temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
@@ -726,19 +728,40 @@ def main(live=True):
                 if matches:
                     print("\n--- Multimodal Matches (real-time, threaded) ---")
                     for m in matches[-5:]:
+                        # Print cosine similarity (keeping this as requested)
+                        print(f"Cosine Similarity (aggregate): {m['cosine_similarity']:.3f}")
                         
-                        # Print cosine similarity
-                        print(f"    Cosine Similarity (aggregate): {m['cosine_similarity']:.3f}")
-                        
-                        # Print detailed pairwise similarities
-                        if 'pairwise_similarities' in m:
+                        # Print detailed pairwise similarities only if verbose mode is enabled
+                        if VERBOSE_OUTPUT and 'pairwise_similarities' in m:
                             ps = m['pairwise_similarities']
                             if ps.get('video_text') is not None:
-                                print(f"      Video-Text Similarity: {ps['video_text']:.3f}")
+                                print(f"  Video-Text Similarity: {ps['video_text']:.3f}")
                             if ps.get('video_audio') is not None:
-                                print(f"      Video-Audio Similarity: {ps['video_audio']:.3f}")
+                                print(f"  Video-Audio Similarity: {ps['video_audio']:.3f}")
                             if ps.get('text_audio') is not None:
-                                print(f"      Text-Audio Similarity: {ps['text_audio']:.3f}")
+                                print(f"  Text-Audio Similarity: {ps['text_audio']:.3f}")
+                        
+                        # Print emotion scores only in verbose mode
+                        if VERBOSE_OUTPUT:
+                            # Print top 3 video emotion scores
+                            print("  Video emotion scores:")
+                            if isinstance(m.get('video_emotion_scores'), dict):
+                                for k, v in sorted(m['video_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
+                                    print(f"    {k}: {v:.2f}")
+                            
+                            # Print top 3 audio emotion scores
+                            if m['audio_modality'] == 'audio':
+                                print(f"  Audio (audio) emotion scores:")
+                                if isinstance(m.get('audio_emotion_scores'), dict):
+                                    for k, v in sorted(m['audio_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
+                                        print(f"    {k}: {v:.2f}")
+                            elif m['audio_modality'] == 'text':
+                                print(f"  Audio (text) emotion scores:")
+                                retrieved_text_scores = m.get('audio_emotion_scores', [])
+                                if isinstance(retrieved_text_scores, list) and retrieved_text_scores:
+                                    for score_entry in retrieved_text_scores[:3]:
+                                        if isinstance(score_entry, dict) and 'label' in score_entry and 'score' in score_entry:
+                                            print(f"    {score_entry['label']}: {score_entry['score']:.2f}")
                                 
                     # Calculate average cosine similarity for recent matches
                     window_size = 3
@@ -746,21 +769,8 @@ def main(live=True):
                     avg_cosine_sim = sum(match['cosine_similarity'] for match in window_matches) / len(window_matches) if window_matches else 0
                     print(f"Average Cosine Similarity (last {len(window_matches)}): {avg_cosine_sim:.3f}")
                     
-                    # Refined windowed consistency metric
-                    consistent_count = 0
-                    for match in window_matches:
-                        if match['facial_emotion'] == match['audio_emotion']:
-                            consistent_count += 1
-                    if window_matches:
-                        consistency_pct = 100.0 * consistent_count / len(window_matches)
-                        print(f"Label Consistency (last {len(window_matches)}): {consistency_pct:.1f}%")
-                    else:
-                        print("No matches yet.")
-                        
-                    # Mismatch indicator for the most recent match
+                    # Consistency indicator for the most recent match
                     latest = matches[-1]
-                    
-                    # Consistency indicator
                     cosine_sim = latest['cosine_similarity']
                     if cosine_sim >= 0.8:
                         consistency_level = "High Consistency ✅✅"
@@ -771,7 +781,7 @@ def main(live=True):
                     else:
                         consistency_level = "Inconsistent ❌"
                     
-                    print(f"Cosine Similarity: {cosine_sim:.3f} - {consistency_level}")
+                    print(f"Consistency: {consistency_level}")
         except KeyboardInterrupt:
             print("Exiting microphone and video emotion detection.")
             stop_flag['stop'] = True
