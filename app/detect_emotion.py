@@ -274,11 +274,28 @@ def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0
     return matches
 
 def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event):
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Cannot access webcam.")
-        stop_flag['stop'] = True
+    """Thread for processing video frames for emotion detection"""
+    try:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            print("Error: Cannot access webcam. Continuing with audio-only analysis.")
+            # Signal that video processing has attempted to start (even if failed)
+            video_started_event.set()
+            
+            # Don't stop the entire system, just exit this thread
+            while not stop_flag['stop']:
+                time.sleep(1)  # Keep thread alive but idle
+            return
+    except Exception as e:
+        print(f"Error initializing webcam: {e}")
+        # Signal that video processing has attempted to start (even if failed)
+        video_started_event.set()
+        
+        # Don't stop the entire system, just exit this thread
+        while not stop_flag['stop']:
+            time.sleep(1)  # Keep thread alive but idle
         return
+        
     # Signal that video processing has started
     video_started_event.set()
     
@@ -286,13 +303,27 @@ def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_e
     window_start_time = time.time()
     frame_emotions = []
     
+    retry_count = 0
+    max_retries = 5
+    
     while not stop_flag['stop']:
-        ret, frame = cap.read()
-        if not ret:
-            print("Error: Failed to read video frame.")
-            break
-        
         try:
+            ret, frame = cap.read()
+            if not ret:
+                retry_count += 1
+                print(f"Error: Failed to read video frame. Retry {retry_count}/{max_retries}...")
+                if retry_count >= max_retries:
+                    print("Maximum retries reached. Continuing with audio-only analysis.")
+                    # Keep thread alive but idle instead of exiting completely
+                    while not stop_flag['stop']:
+                        time.sleep(1)
+                    break
+                time.sleep(2)
+                continue
+                
+            # Reset retry count on successful frame read
+            retry_count = 0
+            
             # Process this frame with DeepFace
             results = DeepFace.analyze(
                 img_path=frame,
@@ -373,15 +404,18 @@ def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_e
                 window_start_time = current_time
                 frame_emotions = []
                 
+            cv2.imshow('Real-time Video Emotion Detection', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                stop_flag['stop'] = True
+                break
+                
         except Exception as e:
             print(f"Video analysis error: {e}")
+            time.sleep(0.1)  # Prevent tight loop in case of repeated errors
             
-        cv2.imshow('Real-time Video Emotion Detection', frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            stop_flag['stop'] = True
-            break
-            
-    cap.release()
+    # Clean up resources
+    if cap is not None and cap.isOpened():
+        cap.release()
     cv2.destroyAllWindows()
 
 def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device, video_started_event):
@@ -522,7 +556,7 @@ def create_unified_emotion_vector(emotion_scores, mapping_dict):
 # Suppress DeepFace logging for cleaner console output
 logging.getLogger().setLevel(logging.ERROR)
 
-def main(live=True):
+def main(live=True, emotion_queue=None, stop_event=None):
     # Set detection mode based on argument
     print(f"Detection mode: {'live' if live else 'video_file'}")
     # Load models
@@ -702,18 +736,39 @@ def main(live=True):
         # Clean up temp audio file
         os.remove(audio_path)
     else:
-        print("Starting live microphone and video emotion detection (threaded). Press Ctrl+C to stop.")
+        print("Starting live microphone and video emotion detection (threaded).")
         video_emotions = []
         audio_emotion_log = []
         video_lock = threading.Lock()
         audio_lock = threading.Lock()
-        stop_flag = {'stop': False}
+        
+        # Use either the external stop_event or a local stop_flag
+        if stop_event:
+            # Convert multiprocessing.Event to a dict for compatibility with existing code
+            stop_flag = {'stop': False}
+            
+            # Create a thread to monitor the stop_event and update stop_flag
+            def monitor_stop_event():
+                while not stop_event.is_set():
+                    time.sleep(0.1)
+                stop_flag['stop'] = True
+                print("Stop event detected, stopping emotion detection...")
+            
+            monitor_thread = threading.Thread(target=monitor_stop_event)
+            monitor_thread.daemon = True
+            monitor_thread.start()
+        else:
+            # If no external stop_event, use internal stop_flag
+            stop_flag = {'stop': False}
+        
         video_started_event = threading.Event()
+        
         # Start threads
         video_thread = threading.Thread(target=video_processing_loop, args=(video_emotions, video_lock, stop_flag, video_started_event))
         audio_thread = threading.Thread(target=audio_processing_loop, args=(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device, video_started_event))
         video_thread.start()
         audio_thread.start()
+        
         try:
             while not stop_flag['stop']:
                 time.sleep(2)  # Poll every 2 seconds
@@ -726,23 +781,20 @@ def main(live=True):
 
                 matches = match_multimodal_emotions(video_window, audio_window)
                 if matches:
-                    print("\n--- Multimodal Matches (real-time, threaded) ---")
-                    for m in matches[-5:]:
-                        # Print cosine similarity (keeping this as requested)
-                        print(f"Cosine Similarity (aggregate): {m['cosine_similarity']:.3f}")
-                        
-                        # Print detailed pairwise similarities only if verbose mode is enabled
-                        if VERBOSE_OUTPUT and 'pairwise_similarities' in m:
-                            ps = m['pairwise_similarities']
-                            if ps.get('video_text') is not None:
-                                print(f"  Video-Text Similarity: {ps['video_text']:.3f}")
-                            if ps.get('video_audio') is not None:
-                                print(f"  Video-Audio Similarity: {ps['video_audio']:.3f}")
-                            if ps.get('text_audio') is not None:
-                                print(f"  Text-Audio Similarity: {ps['text_audio']:.3f}")
-                        
-                        # Print emotion scores only in verbose mode
-                        if VERBOSE_OUTPUT:
+                    if VERBOSE_OUTPUT:
+                        print("\n--- Multimodal Matches (real-time, threaded) ---")
+                        for m in matches[-5:]:
+                            print(f"Cosine Similarity (aggregate): {m['cosine_similarity']:.3f}")
+                            
+                            if 'pairwise_similarities' in m:
+                                ps = m['pairwise_similarities']
+                                if ps.get('video_text') is not None:
+                                    print(f"  Video-Text Similarity: {ps['video_text']:.3f}")
+                                if ps.get('video_audio') is not None:
+                                    print(f"  Video-Audio Similarity: {ps['video_audio']:.3f}")
+                                if ps.get('text_audio') is not None:
+                                    print(f"  Text-Audio Similarity: {ps['text_audio']:.3f}")
+                            
                             # Print top 3 video emotion scores
                             print("  Video emotion scores:")
                             if isinstance(m.get('video_emotion_scores'), dict):
@@ -762,16 +814,20 @@ def main(live=True):
                                     for score_entry in retrieved_text_scores[:3]:
                                         if isinstance(score_entry, dict) and 'label' in score_entry and 'score' in score_entry:
                                             print(f"    {score_entry['label']}: {score_entry['score']:.2f}")
-                                
+                    
                     # Calculate average cosine similarity for recent matches
                     window_size = 3
                     window_matches = matches[-window_size:] if len(matches) >= window_size else matches
                     avg_cosine_sim = sum(match['cosine_similarity'] for match in window_matches) / len(window_matches) if window_matches else 0
-                    print(f"Average Cosine Similarity (last {len(window_matches)}): {avg_cosine_sim:.3f}")
                     
-                    # Consistency indicator for the most recent match
+                    if VERBOSE_OUTPUT:
+                        print(f"Average Cosine Similarity (last {len(window_matches)}): {avg_cosine_sim:.3f}")
+                    
+                    # Get the most recent match for the dashboard
                     latest = matches[-1]
                     cosine_sim = latest['cosine_similarity']
+                    
+                    # Determine consistency level
                     if cosine_sim >= 0.8:
                         consistency_level = "High Consistency ✅✅"
                     elif cosine_sim >= 0.6:
@@ -781,12 +837,45 @@ def main(live=True):
                     else:
                         consistency_level = "Inconsistent ❌"
                     
-                    print(f"Consistency: {consistency_level}")
+                    if VERBOSE_OUTPUT:
+                        print(f"Consistency: {consistency_level}")
+                    
+                    # If we have a queue, send the latest match data to the dashboard
+                    if emotion_queue is not None:
+                        # Extract and format the data for the dashboard
+                        dashboard_data = {
+                            "facial_emotion": (
+                                latest.get('facial_emotion', 'unknown'),
+                                latest.get('facial_confidence', 0.0)
+                            ),
+                            "text_emotion": (
+                                latest.get('text_emotion', 'unknown') if 'text_emotion' in latest else 
+                                (latest.get('audio_emotion', 'unknown') if latest.get('audio_modality') == 'text' else 'unknown'),
+                                latest.get('text_confidence', 0.0) if 'text_confidence' in latest else 
+                                (latest.get('audio_confidence', 0.0) if latest.get('audio_modality') == 'text' else 0.0)
+                            ),
+                            "audio_emotion": (
+                                latest.get('audio_emotion', 'unknown') if latest.get('audio_modality', '') == 'audio' else 'unknown',
+                                latest.get('audio_confidence', 0.0) if latest.get('audio_modality', '') == 'audio' else 0.0
+                            ),
+                            "transcribed_text": latest.get('transcribed_text', ""),
+                            "cosine_similarity": cosine_sim,
+                            "consistency_level": consistency_level
+                        }
+                        
+                        try:
+                            # Send data to the queue without blocking (timeout=1)
+                            emotion_queue.put(dashboard_data, timeout=1)
+                        except Exception as e:
+                            print(f"Error sending data to dashboard: {e}")
+                            
         except KeyboardInterrupt:
             print("Exiting microphone and video emotion detection.")
             stop_flag['stop'] = True
-        video_thread.join()
-        audio_thread.join()
+            
+        print("Waiting for threads to finish...")
+        video_thread.join(timeout=5)
+        audio_thread.join(timeout=5)
 
 if __name__ == "__main__":
     main()

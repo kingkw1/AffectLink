@@ -7,6 +7,7 @@ import queue
 from collections import deque
 import os
 import sys
+import multiprocessing
 
 # Add the current directory to sys.path to import local modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,9 @@ EMOTION_COLORS = {
     'angry': '#EF5350',
     'unknown': '#E0E0E0'
 }
+
+# Flag to control when the dashboard should stop
+should_stop = False
 
 def get_consistency_level(cosine_sim):
     """Convert cosine similarity to consistency level label"""
@@ -78,77 +82,27 @@ def video_capture_thread():
         
     cap.release()
 
-# Mock function to simulate receiving emotion data from detect_emotion.py
-# In a real implementation, this would receive data from detect_emotion.py
-def receive_emotion_data_thread():
-    """Thread to simulate receiving emotion data from detect_emotion.py"""
-    emotions = ['neutral', 'happy', 'sad', 'angry']
-    sample_texts = [
-        "I'm feeling pretty good today.",
-        "This is an interesting conversation.",
-        "I'm not sure how I feel about that.",
-        "That's amazing news!",
-        "I'm a bit disappointed with the results."
-    ]
-    
-    while True:
-        # Simulate receiving emotion data
-        # In a real implementation, this would get data from detect_emotion.py
-        
-        # Get facial emotion
-        facial_emotion = np.random.choice(emotions)
-        facial_confidence = np.random.uniform(0.6, 0.95)
-        
-        # Get audio/text emotion
-        text_emotion = np.random.choice(emotions)
-        text_confidence = np.random.uniform(0.6, 0.95)
-        
-        # Get SER emotion
-        audio_emotion = np.random.choice(emotions)
-        audio_confidence = np.random.uniform(0.6, 0.95)
-        
-        # Get transcribed text
-        transcribed_text = np.random.choice(sample_texts)
-        
-        # Get cosine similarity
-        cosine_similarity = np.random.uniform(0.3, 0.9)
-        
-        # Create data packet
-        data = {
-            "facial_emotion": (facial_emotion, facial_confidence),
-            "text_emotion": (text_emotion, text_confidence),
-            "audio_emotion": (audio_emotion, audio_confidence),
-            "transcribed_text": transcribed_text,
-            "cosine_similarity": cosine_similarity,
-            "consistency_level": get_consistency_level(cosine_similarity)[0]
-        }
-        
-        # Update queue
-        if emotion_data_queue.full():
-            try:
-                emotion_data_queue.get_nowait()
-            except queue.Empty:
-                pass
-                
-        emotion_data_queue.put(data)
-        time.sleep(1.0)  # Update every second
+# Add a thread-safe queue for passing data to the main thread
+ui_update_queue = queue.Queue()
 
 def update_dashboard():
     """Update dashboard with latest emotion data"""
     global latest_data
-    
-    # Get latest data
-    try:
-        latest_data = emotion_data_queue.get_nowait()
-    except queue.Empty:
-        pass
-          # Get latest video frame
+
+    # Process updates from the UI update queue
+    while not ui_update_queue.empty():
+        try:
+            latest_data = ui_update_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    # Get latest video frame
     try:
         frame = video_frame_queue.get_nowait()
         video_container.image(frame, channels="RGB", use_container_width=True)
     except queue.Empty:
         pass
-        
+
     # Update metrics
     facial_emotion, facial_confidence = latest_data["facial_emotion"]
     facial_emotion_container.metric(
@@ -156,10 +110,10 @@ def update_dashboard():
         f"{facial_emotion.capitalize()}", 
         f"{facial_confidence:.2f}"
     )
-    
+
     # Update transcribed text
     text_container.markdown(f"**Latest transcription:**  \n{latest_data['transcribed_text']}")
-    
+
     # Update audio emotions
     text_emotion, text_confidence = latest_data["text_emotion"]
     text_emotion_container.metric(
@@ -167,14 +121,14 @@ def update_dashboard():
         f"{text_emotion.capitalize()}", 
         f"{text_confidence:.2f}"
     )
-    
+
     audio_emotion, audio_confidence = latest_data["audio_emotion"]
     audio_emotion_container.metric(
         "Audio (SER) Emotion", 
         f"{audio_emotion.capitalize()}", 
         f"{audio_confidence:.2f}"
     )
-    
+
     # Update consistency
     consistency_level, color = get_consistency_level(latest_data["cosine_similarity"])
     consistency_container.metric(
@@ -182,6 +136,30 @@ def update_dashboard():
         consistency_level,
         f"{latest_data['cosine_similarity']:.2f}"
     )
+
+def receive_emotion_data_thread(mp_queue, stop_event):
+    """Thread to receive emotion data from detect_emotion.py via multiprocessing queue"""
+    global should_stop
+
+    while not should_stop:
+        if stop_event and stop_event.is_set():
+            should_stop = True
+            print("Stop event detected in emotion data receiver thread")
+            break
+
+        try:
+            # Try to get data from the multiprocessing queue with a timeout
+            data = mp_queue.get(timeout=0.5)
+
+            # Pass data to the UI update queue
+            ui_update_queue.put(data)
+
+        except (queue.Empty, multiprocessing.queues.Empty):
+            # If no data is available, continue the loop
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"Error receiving emotion data: {e}")
+            time.sleep(0.1)
 
 # Main Streamlit app
 st.set_page_config(
@@ -216,15 +194,39 @@ with col2:
     st.markdown("### Overall Consistency")
     consistency_container = st.empty()
 
-# Start background threads
-video_thread = threading.Thread(target=video_capture_thread)
-emotion_thread = threading.Thread(target=receive_emotion_data_thread)
-video_thread.daemon = True
-emotion_thread.daemon = True
-video_thread.start()
-emotion_thread.start()
+# Define the main function for the dashboard application
+def main(emotion_queue=None, stop_event=None):
+    """Main function to start the Streamlit dashboard with queue for IPC"""
+    global should_stop
+    
+    # Start video capture thread
+    video_thread = threading.Thread(target=video_capture_thread)
+    video_thread.daemon = True
+    video_thread.start()
+    
+    # Start emotion data receiving thread if a queue is provided
+    if emotion_queue is not None:
+        emotion_thread = threading.Thread(
+            target=receive_emotion_data_thread,
+            args=(emotion_queue, stop_event)
+        )
+        emotion_thread.daemon = True
+        emotion_thread.start()
+    
+    # Update dashboard in a loop
+    while not should_stop:
+        update_dashboard()
+        
+        # Check if stop event is set
+        if stop_event and stop_event.is_set():
+            should_stop = True
+            print("Stop event detected in dashboard main loop")
+            break
+            
+        time.sleep(0.1)  # Update every 100ms
+        
+    print("Dashboard loop exited")
 
-# Update dashboard in a loop
-while True:
-    update_dashboard()
-    time.sleep(0.1)  # Update every 100ms
+# If run directly (for testing)
+if __name__ == "__main__":
+    main()
