@@ -142,11 +142,10 @@ def update_dashboard():
         latest_data = emotion_data_queue.get_nowait()
     except queue.Empty:
         pass
-        
-    # Get latest video frame
+          # Get latest video frame
     try:
         frame = video_frame_queue.get_nowait()
-        video_container.image(frame, channels="RGB", use_column_width=True)
+        video_container.image(frame, channels="RGB", use_container_width=True)
     except queue.Empty:
         pass
         
