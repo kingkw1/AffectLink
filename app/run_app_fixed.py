@@ -71,28 +71,35 @@ def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
     finally:
         print("Emotion detection process stopped")
 
+# Dashboard entrypoint using Streamlit's internal CLI
+def _dashboard_entry():
+    import sys
+    # Programmatically invoke Streamlit CLI to run the dashboard script
+    from streamlit.web import cli as stcli
+    script_path = os.path.join(current_dir, "dashboard.py")
+    sys.argv = ["streamlit", "run", script_path]
+    stcli.main()
+
+import dashboard  # Import dashboard module for multiprocessing launch
+
+# Replace with subprocess-based launcher
 def run_dashboard():
-    """Run the Streamlit dashboard as a separate process using streamlit run."""
+    """Run the Streamlit dashboard as a separate subprocess using the CLI."""
     dashboard_path = os.path.join(current_dir, "dashboard.py")
+    # Construct command to launch Streamlit
+    print(f"Launching Streamlit dashboard...")
     try:
-        # Use Python executable to launch Streamlit module for better compatibility
-        python_exe = sys.executable
-        # Windows flags to detach process
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NEW_PROCESS_GROUP = 0x00000200
-        creationflags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        cmd = [python_exe, "-m", "streamlit", "run", dashboard_path]
-        # Launch the Streamlit dashboard as a detached process
-        process = subprocess.Popen(
-            cmd,
-            cwd=current_dir,
-            creationflags=creationflags,
-            close_fds=True
-        )
-        print(f"Streamlit dashboard started with PID {process.pid}")
+        # On Windows, use 'start' to open in new console window
+        if os.name == 'nt':
+            cmd = ['cmd', '/c', 'start', '""', sys.executable, '-m', 'streamlit', 'run', dashboard_path]
+            process = subprocess.Popen(cmd, cwd=current_dir)
+        else:
+            cmd = [sys.executable, '-m', 'streamlit', 'run', dashboard_path]
+            process = subprocess.Popen(cmd, cwd=current_dir)
+        print(f"Streamlit dashboard started (PID {process.pid})")
         return process
     except Exception as e:
-        print(f"Error starting Streamlit dashboard: {e}")
+        print(f"Error launching Streamlit dashboard: {e}")
         return None
 
 def test_webcam():
@@ -188,20 +195,20 @@ def main():
     try:
         print("Starting AffectLink multimodal emotion analysis system...")
         
-        # Wait for processes to finish or for a keyboard interrupt
         while not stop_event.is_set():
             time.sleep(0.5)
-            
-            # Check if processes are still alive
+            # Check if the detector process is still alive
             if not detector_process.is_alive():
                 print("Detector process has terminated.")
                 stop_event.set()
                 break
-                
+            # Check if the Streamlit dashboard has terminated
             if dashboard_process and dashboard_process.poll() is not None:
                 print("Dashboard process has terminated.")
-                stop_event.set()
-                break
+                # Optionally we can choose to not shut down on dashboard exit
+                # stop_event.set()
+                # break
+                pass
                 
     except KeyboardInterrupt:
         print("Keyboard interrupt received. Shutting down...")
@@ -212,4 +219,6 @@ def main():
         signal_handler(signal.SIGINT, None)
         
 if __name__ == "__main__":
+    if sys.platform.startswith("win") and __name__ == "__main__":
+        multiprocessing.freeze_support()
     main()
