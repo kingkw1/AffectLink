@@ -80,28 +80,6 @@ def _dashboard_entry():
     sys.argv = ["streamlit", "run", script_path]
     stcli.main()
 
-import dashboard  # Import dashboard module for multiprocessing launch
-
-# Replace with subprocess-based launcher
-def run_dashboard():
-    """Run the Streamlit dashboard as a separate subprocess using the CLI."""
-    dashboard_path = os.path.join(current_dir, "dashboard.py")
-    # Construct command to launch Streamlit
-    print(f"Launching Streamlit dashboard...")
-    try:
-        # On Windows, use 'start' to open in new console window
-        if os.name == 'nt':
-            cmd = ['cmd', '/c', 'start', '""', sys.executable, '-m', 'streamlit', 'run', dashboard_path]
-            process = subprocess.Popen(cmd, cwd=current_dir)
-        else:
-            cmd = [sys.executable, '-m', 'streamlit', 'run', dashboard_path]
-            process = subprocess.Popen(cmd, cwd=current_dir)
-        print(f"Streamlit dashboard started (PID {process.pid})")
-        return process
-    except Exception as e:
-        print(f"Error launching Streamlit dashboard: {e}")
-        return None
-
 def test_webcam():
     """Test if webcam is available and functioning."""
     print("Testing webcam availability...")
@@ -165,17 +143,13 @@ def main():
     if not webcam_available:
         print("Warning: No webcam available. Continuing with audio-only mode.")
     
-    # Create shared stop event for signaling processes to stop
+    # Create shared stop event and Manager for IPC queues
     stop_event = multiprocessing.Event()
+    manager = multiprocessing.Manager()
+    emotion_queue = manager.Queue()
+    shared_frame_queue = manager.Queue(maxsize=5)
     
-    # Create queues for inter-process communication
-    emotion_queue = multiprocessing.Queue()
-    shared_frame_queue = multiprocessing.Queue(maxsize=5)
-    
-    # Store the shared frame queue in an environment variable so the dashboard can access it
-    os.environ['SHARED_FRAME_QUEUE'] = str(id(shared_frame_queue))
-    
-    # Create and start the emotion detection process
+    # Launch emotion detector in its own process using Manager queues
     detector_process = multiprocessing.Process(
         target=run_detector,
         args=(emotion_queue, stop_event, shared_frame_queue)
@@ -188,9 +162,10 @@ def main():
     # Give the detector process a moment to initialize
     time.sleep(2)
     
-    # Start the Streamlit dashboard process
-    print("Starting dashboard process...")
-    dashboard_process = run_dashboard()
+    # Streamlit dashboard should be run in a separate terminal to avoid warnings
+    print("AffectLink detector is running. To view the dashboard, open a new shell and run:")
+    print(f"    streamlit run {os.path.join(current_dir, 'dashboard.py')} --logger.level=error")
+    dashboard_process = None
     
     try:
         print("Starting AffectLink multimodal emotion analysis system...")
@@ -202,13 +177,8 @@ def main():
                 print("Detector process has terminated.")
                 stop_event.set()
                 break
-            # Check if the Streamlit dashboard has terminated
-            if dashboard_process and dashboard_process.poll() is not None:
-                print("Dashboard process has terminated.")
-                # Optionally we can choose to not shut down on dashboard exit
-                # stop_event.set()
-                # break
-                pass
+            # Dashboard is run in a child process; we do not terminate on its exit
+            pass
                 
     except KeyboardInterrupt:
         print("Keyboard interrupt received. Shutting down...")
@@ -219,6 +189,6 @@ def main():
         signal_handler(signal.SIGINT, None)
         
 if __name__ == "__main__":
-    if sys.platform.startswith("win") and __name__ == "__main__":
-        multiprocessing.freeze_support()
+    # Required for Windows multiprocessing
+    multiprocessing.freeze_support()
     main()

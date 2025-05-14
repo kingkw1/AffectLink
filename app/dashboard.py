@@ -1,3 +1,12 @@
+# Suppress missing ScriptRunContext and set Streamlit log level before import
+import os
+os.environ['STREAMLIT_LOG_LEVEL'] = 'error'
+import warnings
+warnings.filterwarnings("ignore", ".*missing ScriptRunContext.*")
+import logging
+logging.getLogger('streamlit.runtime.scriptrunner_utils.script_run_context').setLevel(logging.ERROR)
+
+# Then import Streamlit
 import streamlit as st
 import cv2
 import numpy as np
@@ -17,30 +26,10 @@ if current_dir not in sys.path:
 # Import shared data structures from detect_emotion.py
 # We'll use a queue-based approach for communication between processes
 
-# Set up queues for sharing data between processes
-try:
-    # Try to get the shared frame queue from environment variable
-    queue_id_str = os.environ.get('SHARED_FRAME_QUEUE')
-    if queue_id_str:
-        try:
-            import ctypes
-            queue_id = int(queue_id_str)
-            # Get the multiprocessing.Queue object from its ID
-            video_frame_queue = ctypes.cast(queue_id, ctypes.py_object).value
-            print("Successfully connected to shared frame queue")
-        except Exception as e:
-            print(f"Could not connect to shared frame queue: {e}")
-            # Fall back to local queue
-            video_frame_queue = queue.Queue(maxsize=5)
-    else:
-        # Fall back to local queue
-        video_frame_queue = queue.Queue(maxsize=5)
-except Exception:
-    # Fall back to local queue
-    video_frame_queue = queue.Queue(maxsize=5)
-
-# Queue for emotion data
-emotion_data_queue = queue.Queue(maxsize=10)
+import queue  # Local placeholder
+# Global queues, will be set in main()
+video_frame_queue = None
+emotion_data_queue = None
 
 # Store latest emotion data
 latest_data = {
@@ -224,20 +213,23 @@ with col2:
     consistency_container = st.empty()
 
 # Define the main function for the dashboard application
-def main(emotion_queue=None, stop_event=None):
-    """Main function to start the Streamlit dashboard with queue for IPC"""
-    global should_stop
+def main(emotion_queue=None, stop_event=None, frame_queue=None):
+    """Start the Streamlit dashboard using provided IPC queues"""
+    global should_stop, video_frame_queue, emotion_data_queue
     
+    # Assign provided queues to global variables
+    video_frame_queue = frame_queue
+    emotion_data_queue = emotion_queue
     # Start video capture thread
     video_thread = threading.Thread(target=video_capture_thread)
     video_thread.daemon = True
     video_thread.start()
     
     # Start emotion data receiving thread if a queue is provided
-    if emotion_queue is not None:
+    if emotion_data_queue is not None:
         emotion_thread = threading.Thread(
             target=receive_emotion_data_thread,
-            args=(emotion_queue, stop_event)
+            args=(emotion_data_queue, stop_event)
         )
         emotion_thread.daemon = True
         emotion_thread.start()
@@ -258,4 +250,7 @@ def main(emotion_queue=None, stop_event=None):
 
 # If run directly (for testing)
 if __name__ == "__main__":
-    main()
+    # For standalone testing without Manager, use local queues
+    local_frame_queue = queue.Queue(maxsize=5)
+    local_emotion_queue = queue.Queue(maxsize=10)
+    main(local_emotion_queue, None, local_frame_queue)
