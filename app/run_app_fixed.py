@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# filepath: c:\Users\kingk\OneDrive\Documents\Projects\AffectLink\app\run_app.py
 """
-run_app.py - Main script to run the emotion detection and dashboard processes
-using multiprocessing for inter-process communication.
+run_app_fixed.py - Enhanced main script for AffectLink with improved frame sharing
+between the emotion detection and dashboard processes.
 """
 
 import multiprocessing
@@ -13,16 +12,19 @@ import sys
 import subprocess
 import threading
 import cv2
-# Import our camera utilities module
-from camera_utils import find_available_camera
 
 # Add the current directory to sys.path to import local modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
 
-# Variables for inter-process communication
+# Import our camera utility
+from camera_utils import find_available_camera
+
+# Global variables
 stop_event = None
+dashboard_process = None
+detector_process = None
 
 def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
     """Run the emotion detection process with queue for IPC"""
@@ -73,12 +75,21 @@ def run_dashboard():
     """Run the Streamlit dashboard as a separate process using streamlit run."""
     dashboard_path = os.path.join(current_dir, "dashboard.py")
     try:
-        # Launch the Streamlit dashboard using subprocess
+        # Use Python executable to launch Streamlit module for better compatibility
+        python_exe = sys.executable
+        # Windows flags to detach process
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        creationflags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        cmd = [python_exe, "-m", "streamlit", "run", dashboard_path]
+        # Launch the Streamlit dashboard as a detached process
         process = subprocess.Popen(
-            ["streamlit", "run", dashboard_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            cmd,
+            cwd=current_dir,
+            creationflags=creationflags,
+            close_fds=True
         )
+        print(f"Streamlit dashboard started with PID {process.pid}")
         return process
     except Exception as e:
         print(f"Error starting Streamlit dashboard: {e}")
@@ -107,23 +118,52 @@ def test_webcam():
 
 def signal_handler(signum, frame):
     """Handle Ctrl+C to gracefully stop all processes"""
+    global stop_event, dashboard_process, detector_process
+    
     print("Received interrupt signal. Shutting down processes...")
     if stop_event:
         stop_event.set()
+        
+    # Give processes time to clean up
+    time.sleep(1)
+    
+    # Explicitly terminate processes if they're still running
+    if detector_process and detector_process.is_alive():
+        try:
+            detector_process.terminate()
+            print("Terminated detector process")
+        except Exception:
+            pass
+            
+    if dashboard_process and dashboard_process.poll() is None:
+        try:
+            dashboard_process.terminate()
+            print("Terminated dashboard process")
+        except Exception:
+            pass
+            
+    print("Shutdown complete")
+    sys.exit(0)
 
-if __name__ == "__main__":
+def main():
+    """Main function to run the AffectLink system"""
+    global stop_event, dashboard_process, detector_process
+    
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     # Test webcam availability before starting processes
     webcam_available = test_webcam()
+    if not webcam_available:
+        print("Warning: No webcam available. Continuing with audio-only mode.")
     
     # Create shared stop event for signaling processes to stop
     stop_event = multiprocessing.Event()
-      # Create queues for inter-process communication
+    
+    # Create queues for inter-process communication
     emotion_queue = multiprocessing.Queue()
-    shared_frame_queue = multiprocessing.Queue(maxsize=5)  # Limit to 5 frames to avoid memory issues
+    shared_frame_queue = multiprocessing.Queue(maxsize=5)
     
     # Store the shared frame queue in an environment variable so the dashboard can access it
     os.environ['SHARED_FRAME_QUEUE'] = str(id(shared_frame_queue))
@@ -133,43 +173,43 @@ if __name__ == "__main__":
         target=run_detector,
         args=(emotion_queue, stop_event, shared_frame_queue)
     )
-
-    # Start the Streamlit dashboard as a separate process
+    
+    # Start the emotion detection process
+    print("Starting emotion detection process...")
+    detector_process.start()
+    
+    # Give the detector process a moment to initialize
+    time.sleep(2)
+    
+    # Start the Streamlit dashboard process
+    print("Starting dashboard process...")
     dashboard_process = run_dashboard()
-
+    
     try:
         print("Starting AffectLink multimodal emotion analysis system...")
-        detector_process.start()
-
-        # Wait for processes to finish
+        
+        # Wait for processes to finish or for a keyboard interrupt
         while not stop_event.is_set():
-            time.sleep(1)
-
+            time.sleep(0.5)
+            
             # Check if processes are still alive
-            if not detector_process.is_alive() or (dashboard_process and dashboard_process.poll() is not None):
-                print("One of the processes has terminated. Shutting down...")
+            if not detector_process.is_alive():
+                print("Detector process has terminated.")
                 stop_event.set()
                 break
-
+                
+            if dashboard_process and dashboard_process.poll() is not None:
+                print("Dashboard process has terminated.")
+                stop_event.set()
+                break
+                
     except KeyboardInterrupt:
         print("Keyboard interrupt received. Shutting down...")
         stop_event.set()
-
+        
     finally:
-        # Give processes time to clean up
-        time.sleep(1)
-
-        # Wait for detector process to terminate
-        if detector_process.is_alive():
-            print("Waiting for detector process to terminate...")
-            detector_process.join(timeout=5)
-            if detector_process.is_alive():
-                print("Detector process did not terminate gracefully. Terminating...")
-                detector_process.terminate()
-
-        # Terminate the Streamlit dashboard process
-        if dashboard_process and dashboard_process.poll() is None:
-            print("Terminating Streamlit dashboard process...")
-            dashboard_process.terminate()
-
-        print("AffectLink system shut down.")
+        # Cleanup
+        signal_handler(signal.SIGINT, None)
+        
+if __name__ == "__main__":
+    main()

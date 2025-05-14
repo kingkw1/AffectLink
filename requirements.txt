@@ -8,3 +8,4 @@ torch
 torchaudio
 numpy
 tf-keras
+streamlit

@@ -16,10 +16,30 @@ if current_dir not in sys.path:
 
 # Import shared data structures from detect_emotion.py
 # We'll use a queue-based approach for communication between processes
-# In a real implementation, these would be imported or shared via IPC mechanisms
 
-# Global variables for shared data
-video_frame_queue = queue.Queue(maxsize=5)
+# Set up queues for sharing data between processes
+try:
+    # Try to get the shared frame queue from environment variable
+    queue_id_str = os.environ.get('SHARED_FRAME_QUEUE')
+    if queue_id_str:
+        try:
+            import ctypes
+            queue_id = int(queue_id_str)
+            # Get the multiprocessing.Queue object from its ID
+            video_frame_queue = ctypes.cast(queue_id, ctypes.py_object).value
+            print("Successfully connected to shared frame queue")
+        except Exception as e:
+            print(f"Could not connect to shared frame queue: {e}")
+            # Fall back to local queue
+            video_frame_queue = queue.Queue(maxsize=5)
+    else:
+        # Fall back to local queue
+        video_frame_queue = queue.Queue(maxsize=5)
+except Exception:
+    # Fall back to local queue
+    video_frame_queue = queue.Queue(maxsize=5)
+
+# Queue for emotion data
 emotion_data_queue = queue.Queue(maxsize=10)
 
 # Store latest emotion data
@@ -56,31 +76,23 @@ def get_consistency_level(cosine_sim):
         return "Inconsistent ❌", "red"
 
 def video_capture_thread():
-    """Thread to capture video frames from webcam and put them in queue"""
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Cannot access webcam.")
-        return
+    """
+    Thread to receive video frames from the emotion detection process.
+    We don't open the camera here - we just take frames from the shared queue.
+    """
+    print("Dashboard video capture thread started")
+    
+    # Keep checking the queue until should_stop is set
+    while not should_stop:
+        if not video_frame_queue.full():
+            # No need to do anything - the emotion detection process
+            # is adding frames to the queue directly
+            pass
         
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-            
-        # Convert to RGB for Streamlit
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Slow down a bit to reduce CPU usage
+        time.sleep(0.03)
         
-        # If queue is full, remove oldest frame
-        if video_frame_queue.full():
-            try:
-                video_frame_queue.get_nowait()
-            except queue.Empty:
-                pass
-                
-        video_frame_queue.put(frame_rgb)
-        time.sleep(0.03)  # ~30 FPS
-        
-    cap.release()
+    print("Dashboard video capture thread stopped")
 
 # Add a thread-safe queue for passing data to the main thread
 ui_update_queue = queue.Queue()
@@ -97,11 +109,28 @@ def update_dashboard():
             pass
 
     # Get latest video frame
+    frame = None
     try:
-        frame = video_frame_queue.get_nowait()
-        video_container.image(frame, channels="RGB", use_container_width=True)
+        # Check if we have a shared queue or a local queue
+        if hasattr(video_frame_queue, 'get_nowait'):
+            # Try to get a frame without blocking
+            frame = video_frame_queue.get_nowait()
+        elif hasattr(video_frame_queue, 'get'):
+            # For multiprocessing.Queue
+            try:
+                frame = video_frame_queue.get(block=False)
+            except Exception:
+                pass
     except queue.Empty:
+        # No new frame available
         pass
+        
+    if frame is not None:
+        # Display the video frame
+        video_container.image(frame, channels="RGB", use_container_width=True)
+        # Store the frame for later use
+        if 'last_frame' not in st.session_state:
+            st.session_state.last_frame = frame
 
     # Update metrics
     facial_emotion, facial_confidence = latest_data["facial_emotion"]

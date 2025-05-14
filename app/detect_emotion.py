@@ -24,6 +24,7 @@ VERBOSE_OUTPUT = False
 # Constants
 VIDEO_WINDOW_DURATION = 5  # seconds
 AUDIO_WINDOW_DURATION = 5  # seconds
+CAMERA_INDEX = 0  # Default camera index, can be overridden
 
 # Model IDs
 TEXT_CLASSIFIER_MODEL_ID = "j-hartmann/emotion-english-distilroberta-base"
@@ -275,10 +276,25 @@ def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0
 
 def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event):
     """Thread for processing video frames for emotion detection"""
+    global CAMERA_INDEX
+    
+    print(f"Initializing video capture with camera index: {CAMERA_INDEX}")
+    
+    # Import the camera utility module
     try:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("Error: Cannot access webcam. Continuing with audio-only analysis.")
+        from camera_utils import find_available_camera
+        
+        # Use our camera utility to find an available camera
+        preferred_index = CAMERA_INDEX
+        use_directshow = os.environ.get('WEBCAM_BACKEND', '').lower() == 'directshow'
+        
+        camera_idx, backend, cap = find_available_camera(
+            preferred_index=preferred_index, 
+            use_directshow=use_directshow
+        )
+        
+        if cap is None:
+            print("Error: Cannot access any webcam. Continuing with audio-only analysis.")
             # Signal that video processing has attempted to start (even if failed)
             video_started_event.set()
             
@@ -287,7 +303,45 @@ def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_e
                 time.sleep(1)  # Keep thread alive but idle
             return
     except Exception as e:
-        print(f"Error initializing webcam: {e}")
+        print(f"Error initializing camera: {e}")
+        # Signal that video processing has attempted to start (even if failed)
+        video_started_event.set()
+        
+        # Don't stop the entire system, just exit this thread
+        while not stop_flag['stop']:
+            time.sleep(1)  # Keep thread alive but idle
+        return
+    except Exception as e:
+        print(f"Error with camera index {CAMERA_INDEX}: {e}")
+        if cap:
+            cap.release()
+            cap = None
+    
+    # If the specified camera failed, try other indices
+    if not available_camera_index:
+        for idx in range(3):  # Try indices 0, 1, 2
+            if idx == CAMERA_INDEX:  # Skip the one we already tried
+                continue
+                
+            try:
+                print(f"Trying camera index {idx}...")
+                temp_cap = cv2.VideoCapture(idx)
+                if temp_cap.isOpened():
+                    ret, frame = temp_cap.read()
+                    if ret:
+                        available_camera_index = idx
+                        cap = temp_cap
+                        print(f"Successfully opened camera with index {idx}")
+                        break
+                    else:
+                        temp_cap.release()
+                else:
+                    print(f"Cannot open camera with index {idx}")
+            except Exception as e:
+                print(f"Error with camera index {idx}: {e}")
+      # Check if we have a working camera
+    if not cap or not cap.isOpened():
+        print("Error: Cannot access any webcam. Continuing with audio-only analysis.")
         # Signal that video processing has attempted to start (even if failed)
         video_started_event.set()
         
@@ -556,9 +610,23 @@ def create_unified_emotion_vector(emotion_scores, mapping_dict):
 # Suppress DeepFace logging for cleaner console output
 logging.getLogger().setLevel(logging.ERROR)
 
-def main(live=True, emotion_queue=None, stop_event=None):
+def main(live=True, emotion_queue=None, stop_event=None, camera_index=0):
     # Set detection mode based on argument
     print(f"Detection mode: {'live' if live else 'video_file'}")
+    
+    # Get camera index from environment if available
+    camera_idx = os.environ.get('WEBCAM_INDEX')
+    if camera_idx is not None:
+        try:
+            camera_index = int(camera_idx)
+            print(f"Using camera index from environment: {camera_index}")
+        except ValueError:
+            print(f"Invalid camera index in environment: {camera_idx}")
+    
+    # Store camera index for video processing
+    global CAMERA_INDEX
+    CAMERA_INDEX = camera_index
+    
     # Load models
     print("Loading Whisper model...")
     whisper_model = whisper.load_model("base")
