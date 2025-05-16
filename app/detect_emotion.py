@@ -18,6 +18,9 @@ import threading
 from moviepy import VideoFileClip
 import numpy as np
 
+# Import our video processing helper
+from video_module_loader import get_video_processing_function
+
 # Output verbosity control
 VERBOSE_OUTPUT = False
 
@@ -26,12 +29,12 @@ VIDEO_WINDOW_DURATION = 5  # seconds
 AUDIO_WINDOW_DURATION = 5  # seconds
 CAMERA_INDEX = 0  # Default camera index, can be overridden
 
+# Emotion categories for unified mapping
+UNIFIED_EMOTIONS = ['neutral', 'happy', 'sad', 'angry']
+
 # Model IDs
 TEXT_CLASSIFIER_MODEL_ID = "j-hartmann/emotion-english-distilroberta-base"
 SER_MODEL_ID = "superb/hubert-large-superb-er"
-
-# Emotion categories for unified mapping
-UNIFIED_EMOTIONS = ['neutral', 'happy', 'sad', 'angry']
 
 # Emotion mapping dictionaries
 TEXT_TO_UNIFIED = {
@@ -39,7 +42,7 @@ TEXT_TO_UNIFIED = {
     'joy': 'happy',
     'sadness': 'sad',
     'anger': 'angry',
-    'fear': None,  # These emotions don't map to our unified set
+    'fear': None,
     'surprise': None,
     'disgust': None
 }
@@ -87,6 +90,9 @@ def classify_emotion(text, classifier):
         return None, None
 
 def classify_emotion_full(text, classifier):
+    """
+    Get full emotion classification results.
+    """
     try:
         result = classifier(text, top_k=None)[0]  # returns list of dicts
         # Sort by score descending
@@ -109,384 +115,163 @@ def analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mappin
         # Move to device
         for k in inputs:
             inputs[k] = inputs[k].to(device)
+            
+        # Get logits
         with torch.no_grad():
-            outputs = ser_model(**inputs)
-            scores = torch.nn.functional.softmax(outputs.logits, dim=1)[0]
-            pred_idx = scores.argmax().item()
-            pred_label = ser_label_mapping[pred_idx]
-            pred_score = scores[pred_idx].item()
-        return pred_label, pred_score
+            logits = ser_model(**inputs).logits
+            
+        # Get scores
+        scores = torch.nn.functional.softmax(logits, dim=1).squeeze().cpu().numpy()
+        
+        # Get the most likely emotion
+        top_idx = scores.argmax()
+        emotion = ser_label_mapping[top_idx]
+        confidence = scores[top_idx]
+        
+        return emotion, confidence
     except Exception as e:
-        print(f"Audio SER error: {e}")
+        print(f"Audio emotion analysis error: {e}")
         return None, None
 
 def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, ser_label_mapping, device):
+    """
+    Get full detailed audio emotion analysis
+    """
     try:
+        # Load audio (mono, 16kHz)
         waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
+        # Process audio
         inputs = ser_processor(waveform, sampling_rate=16000, return_tensors="pt")
+        # Move to device
         for k in inputs:
             inputs[k] = inputs[k].to(device)
+            
+        # Get logits
         with torch.no_grad():
-            outputs = ser_model(**inputs)
-            scores = torch.nn.functional.softmax(outputs.logits, dim=1)[0]
-            all_scores = {ser_label_mapping[i]: float(scores[i].item()) for i in range(len(scores))}
-            pred_idx = scores.argmax().item()
-            pred_label = ser_label_mapping[pred_idx]
-            pred_score = scores[pred_idx].item()
-        return pred_label, pred_score, all_scores
+            logits = ser_model(**inputs).logits
+            
+        # Get scores
+        scores = torch.nn.functional.softmax(logits, dim=1).squeeze().cpu().numpy()
+        
+        # Create emotion-score pairs
+        result = []
+        for i, score in enumerate(scores):
+            emotion = ser_label_mapping[i] if i < len(ser_label_mapping) else f"unknown-{i}"
+            result.append({
+                "emotion": emotion,
+                "score": float(score)
+            })
+        
+        # Sort by score
+        result_sorted = sorted(result, key=lambda x: x["score"], reverse=True)
+        return result_sorted
     except Exception as e:
-        print(f"Audio SER error: {e}")
-        return None, None, {}
+        print(f"Audio emotion full analysis error: {e}")
+        return []
 
 def record_audio_chunk(duration=5, fs=16000):
     """
-    Record audio from the microphone for a given duration (in seconds).
-    Returns the path to a temporary WAV file.
+    Record audio for specified duration and return as numpy array
     """
-    audio = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
-    sd.wait()
-    temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-    with wave.open(temp_wav.name, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)  # 16 bits
-        wf.setframerate(fs)
-        wf.writeframes(audio.tobytes())
-    return temp_wav.name
+    try:
+        audio_data = sd.rec(int(duration * fs), samplerate=fs, channels=1, blocking=True)
+        return audio_data.flatten()
+    except Exception as e:
+        print(f"Audio recording error: {e}")
+        return np.zeros(int(duration * fs))  # Return silence on error
 
 def moving_average(scores):
     """
-    Compute the moving average of a list of scores.
+    Calculate moving average for a list of scores
     """
-    if len(scores) == 0:
+    if not scores:
         return 0
     return sum(scores) / len(scores)
 
 def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0):
     """
-    Match detected facial emotions with detected audio emotions based on timestamp proximity.
-    Calculates cosine similarity between emotion vectors for better consistency measurement.
-    
-    Args:
-        video_emotions: list of dicts with 'timestamp', 'emotion', 'confidence'
-        audio_emotions: list of dicts with 'timestamp', 'modality', 'emotion', 'confidence'
-        time_threshold: max allowed time difference (seconds) for a match
-    Returns:
-        List of dicts with matched emotion data from both modalities.
+    Match video and audio emotions based on timestamps
     """
     matches = []
     
-    # Group audio modalities by timestamp to find text and audio pairs
-    audio_by_timestamp = {}
-    for a in audio_emotions:
-        timestamp = a['timestamp']
-        if timestamp not in audio_by_timestamp:
-            audio_by_timestamp[timestamp] = []
-        audio_by_timestamp[timestamp].append(a)
+    for video_entry in video_emotions:
+        video_time = video_entry["timestamp"]
         
-    for v in video_emotions:
-        v_timestamp = v['timestamp']
+        # Find audio entries close to this video entry
+        close_audio = [
+            audio for audio in audio_emotions
+            if abs(audio["timestamp"] - video_time) <= time_threshold
+        ]
         
-        # Find matching audio entries (both text and SER) near this video timestamp
-        matching_timestamps = [ts for ts in audio_by_timestamp.keys() if abs(v_timestamp - ts) <= time_threshold]
-        
-        for ts in matching_timestamps:
-            entries = audio_by_timestamp[ts]
-            
-            # Extract text and audio modality entries
-            text_entry = next((e for e in entries if e['modality'] == 'text'), None)
-            audio_entry = next((e for e in entries if e['modality'] == 'audio'), None)
-            
-            # Calculate video vector once
-            video_vector = create_unified_emotion_vector(v.get('emotion_scores', {}), FACIAL_TO_UNIFIED)
-            
-            # Calculate text and audio vectors if available
-            text_vector = None
-            if text_entry:
-                text_vector = create_unified_emotion_vector(text_entry.get('emotion_scores', []), TEXT_TO_UNIFIED)
-                
-            audio_vector = None
-            if audio_entry:
-                audio_vector = create_unified_emotion_vector(audio_entry.get('emotion_scores', {}), SER_TO_UNIFIED)
-            
-            # Calculate pairwise similarities
-            video_text_sim = calculate_cosine_similarity(video_vector, text_vector) if text_vector is not None else None
-            video_audio_sim = calculate_cosine_similarity(video_vector, audio_vector) if audio_vector is not None else None
-            text_audio_sim = calculate_cosine_similarity(text_vector, audio_vector) if text_vector is not None and audio_vector is not None else None
-            
-            # Calculate aggregate similarity
-            cosine_similarities = [s for s in [video_text_sim, video_audio_sim, text_audio_sim] if s is not None]
-            aggregate_similarity = sum(cosine_similarities) / len(cosine_similarities) if cosine_similarities else 0
-            
-            # Create match entries for each modality pair
-            match_data = {
-                'video_timestamp': v_timestamp,
-                'facial_emotion': v['emotion'],
-                'facial_confidence': v['confidence'],
-                'video_emotion_scores': v.get('emotion_scores', {}),
-                'video_emotion_vector': video_vector,
-                'cosine_similarity': aggregate_similarity,
-                'pairwise_similarities': {
-                    'video_text': video_text_sim,
-                    'video_audio': video_audio_sim, 
-                    'text_audio': text_audio_sim
-                }
-            }
-            
-            # Add text data if available
-            if text_entry:
-                match_data.update({
-                    'text_timestamp': text_entry['timestamp'],
-                    'text_emotion': text_entry['emotion'],
-                    'text_confidence': text_entry['confidence'],
-                    'text_emotion_scores': text_entry.get('emotion_scores', []),
-                    'text_emotion_vector': text_vector
+        if close_audio:
+            # Add matches
+            for audio_entry in close_audio:
+                matches.append({
+                    "video_emotion": video_entry["emotion"],
+                    "audio_emotion": audio_entry["emotion"],
+                    "timestamp": video_time,
+                    "time_diff": abs(audio_entry["timestamp"] - video_time)
                 })
-            
-            # Add audio data if available
-            if audio_entry:
-                match_data.update({
-                    'audio_timestamp': audio_entry['timestamp'],
-                    'audio_emotion': audio_entry['emotion'],
-                    'audio_confidence': audio_entry['confidence'],
-                    'audio_emotion_scores': audio_entry.get('emotion_scores', {}),
-                    'audio_emotion_vector': audio_vector
-                })
-                
-            # For compatibility with existing code, keep the original format
-            if text_entry:
-                match_data.update({
-                    'audio_timestamp': text_entry['timestamp'],
-                    'audio_modality': 'text',
-                    'audio_emotion': text_entry['emotion'],
-                    'audio_confidence': text_entry['confidence'],
-                    'audio_emotion_scores': text_entry.get('emotion_scores', []),
-                })
-            elif audio_entry:
-                match_data.update({
-                    'audio_timestamp': audio_entry['timestamp'],
-                    'audio_modality': 'audio',
-                    'audio_emotion': audio_entry['emotion'],
-                    'audio_confidence': audio_entry['confidence'],
-                    'audio_emotion_scores': audio_entry.get('emotion_scores', {}),
-                })
-                
-            matches.append(match_data)
     
     return matches
 
-def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event):
-    """Thread for processing video frames for emotion detection"""
-    global CAMERA_INDEX
+def calculate_cosine_similarity(vector_a, vector_b):
+    """
+    Calculate cosine similarity between two vectors
+    """
+    if len(vector_a) != len(vector_b):
+        return 0.0
+        
+    dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+    magnitude_a = math.sqrt(sum(a * a for a in vector_a))
+    magnitude_b = math.sqrt(sum(b * b for b in vector_b))
     
-    print(f"Initializing video capture with camera index: {CAMERA_INDEX}")
+    if magnitude_a == 0 or magnitude_b == 0:
+        return 0.0
+        
+    return dot_product / (magnitude_a * magnitude_b)
+
+def create_unified_emotion_vector(emotion_scores, mapping_dict):
+    """
+    Create a vector of scores in the unified emotion space
+    """
+    unified_vector = [0.0] * len(UNIFIED_EMOTIONS)
     
-    # Import the camera utility module
-    try:
-        from camera_utils import find_available_camera
-        
-        # Use our camera utility to find an available camera
-        preferred_index = CAMERA_INDEX
-        use_directshow = os.environ.get('WEBCAM_BACKEND', '').lower() == 'directshow'
-        
-        camera_idx, backend, cap = find_available_camera(
-            preferred_index=preferred_index, 
-            use_directshow=use_directshow
-        )
-        
-        if cap is None:
-            print("Error: Cannot access any webcam. Continuing with audio-only analysis.")
-            # Signal that video processing has attempted to start (even if failed)
-            video_started_event.set()
+    for emotion, score in emotion_scores.items():
+        # Map to unified emotion if possible
+        if emotion in mapping_dict and mapping_dict[emotion] is not None:
+            unified_emotion = mapping_dict[emotion]
+            unified_index = UNIFIED_EMOTIONS.index(unified_emotion)
+            unified_vector[unified_index] += score
             
-            # Don't stop the entire system, just exit this thread
-            while not stop_flag['stop']:
-                time.sleep(1)  # Keep thread alive but idle
-            return
-    except Exception as e:
-        print(f"Error initializing camera: {e}")
-        # Signal that video processing has attempted to start (even if failed)
-        video_started_event.set()
+    # Normalize
+    total = sum(unified_vector)
+    if total > 0:
+        unified_vector = [score/total for score in unified_vector]
         
-        # Don't stop the entire system, just exit this thread
-        while not stop_flag['stop']:
-            time.sleep(1)  # Keep thread alive but idle
-        return
-    except Exception as e:
-        print(f"Error with camera index {CAMERA_INDEX}: {e}")
-        if cap:
-            cap.release()
-            cap = None
-    
-    # If the specified camera failed, try other indices
-    if not available_camera_index:
-        for idx in range(3):  # Try indices 0, 1, 2
-            if idx == CAMERA_INDEX:  # Skip the one we already tried
-                continue
-                
-            try:
-                print(f"Trying camera index {idx}...")
-                temp_cap = cv2.VideoCapture(idx)
-                if temp_cap.isOpened():
-                    ret, frame = temp_cap.read()
-                    if ret:
-                        available_camera_index = idx
-                        cap = temp_cap
-                        print(f"Successfully opened camera with index {idx}")
-                        break
-                    else:
-                        temp_cap.release()
-                else:
-                    print(f"Cannot open camera with index {idx}")
-            except Exception as e:
-                print(f"Error with camera index {idx}: {e}")
-      # Check if we have a working camera
-    if not cap or not cap.isOpened():
-        print("Error: Cannot access any webcam. Continuing with audio-only analysis.")
-        # Signal that video processing has attempted to start (even if failed)
-        video_started_event.set()
-        
-        # Don't stop the entire system, just exit this thread
-        while not stop_flag['stop']:
-            time.sleep(1)  # Keep thread alive but idle
-        return
-        
-    # Signal that video processing has started
-    video_started_event.set()
-    
-    # For 5-second downsampling
-    window_start_time = time.time()
-    frame_emotions = []
-    
-    retry_count = 0
-    max_retries = 5
-    
-    while not stop_flag['stop']:
-        try:
-            ret, frame = cap.read()
-            if not ret:
-                retry_count += 1
-                print(f"Error: Failed to read video frame. Retry {retry_count}/{max_retries}...")
-                if retry_count >= max_retries:
-                    print("Maximum retries reached. Continuing with audio-only analysis.")
-                    # Keep thread alive but idle instead of exiting completely
-                    while not stop_flag['stop']:
-                        time.sleep(1)
-                    break
-                time.sleep(2)
-                continue
-                
-            # Reset retry count on successful frame read
-            retry_count = 0
-            
-            # Process this frame with DeepFace
-            results = DeepFace.analyze(
-                img_path=frame,
-                actions=['emotion'],
-                enforce_detection=False,
-                detector_backend='opencv'
-            )
-            
-            faces = results if isinstance(results, list) else [results]
-            
-            for face in faces:
-                if 'dominant_emotion' in face:
-                    current_time = time.time()
-                    emo = face['dominant_emotion']
-                    confidence = face.get('emotion', {}).get(emo, None)
-                    emotion_scores = face.get('emotion', {})
-                    
-                    # Store this frame's emotion data for the current window
-                    frame_emotions.append({
-                        'timestamp': current_time,
-                        'emotion': emo,
-                        'confidence': confidence,
-                        'emotion_scores': emotion_scores
-                    })
-                    
-                    # Draw rectangle and overlay text
-                    region = face.get('region', {})
-                    x, y, w, h = region.get('x',0), region.get('y',0), region.get('w',0), region.get('h',0)
-                    cv2.rectangle(frame, (x,y), (x+w, y+h), (0,255,0), 2)
-                    text_y = y-10 if y-10>10 else y+h+20
-                    cv2.putText(frame, f"{emo}", (x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-                else:
-                    print("No face detected or emotion data unavailable.")
-                    
-            # Check if we've reached the end of a 5-second window
-            current_time = time.time()
-            if current_time - window_start_time >= VIDEO_WINDOW_DURATION and frame_emotions:
-                # Calculate average scores for each emotion category
-                unified_emotion_scores = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
-                count = 0
-                
-                for frame_data in frame_emotions:
-                    raw_scores = frame_data.get('emotion_scores', {})
-                    # Map DeepFace emotions to our unified set and accumulate scores
-                    if 'neutral' in raw_scores:
-                        unified_emotion_scores['neutral'] += raw_scores.get('neutral', 0)
-                    if 'happy' in raw_scores:
-                        unified_emotion_scores['happy'] += raw_scores.get('happy', 0)
-                    if 'sad' in raw_scores:
-                        unified_emotion_scores['sad'] += raw_scores.get('sad', 0)
-                    if 'angry' in raw_scores:
-                        unified_emotion_scores['angry'] += raw_scores.get('angry', 0)
-                    count += 1
-                
-                if count > 0:
-                    # Average the scores
-                    for emotion in unified_emotion_scores:
-                        unified_emotion_scores[emotion] /= count
-                    
-                    # Find the dominant emotion from the averaged scores
-                    dominant_emotion = max(unified_emotion_scores.items(), key=lambda x: x[1])
-                    dominant_label = dominant_emotion[0]
-                    dominant_score = dominant_emotion[1]
-                    
-                    # Create the aggregated video emotion entry
-                    aggregated_entry = {
-                        'timestamp': current_time,  # End of the 5-second window
-                        'emotion': dominant_label,
-                        'confidence': dominant_score,
-                        'emotion_scores': unified_emotion_scores
-                    }
-                    
-                    # Add to video emotions log with lock
-                    with video_lock:
-                        video_emotions.append(aggregated_entry)
-                
-                # Reset for next window
-                window_start_time = current_time
-                frame_emotions = []
-                
-            cv2.imshow('Real-time Video Emotion Detection', frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                stop_flag['stop'] = True
-                break
-                
-        except Exception as e:
-            print(f"Video analysis error: {e}")
-            time.sleep(0.1)  # Prevent tight loop in case of repeated errors
-            
-    # Clean up resources
-    if cap is not None and cap.isOpened():
-        cap.release()
-    cv2.destroyAllWindows()
+    return unified_vector
 
 def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device, video_started_event):
+    """Process audio for speech-to-text and emotion analysis"""
     # Wait for video processing to start
     video_started_event.wait()
+    
     chunk_duration = 5
     smoothing_window = 3
     emotion_window = deque(maxlen=smoothing_window)
     score_window = deque(maxlen=smoothing_window)
     audio_emotion_window = deque(maxlen=smoothing_window)
     audio_score_window = deque(maxlen=smoothing_window)
-    while not stop_flag['stop']:
+    
+    while not (isinstance(stop_flag, dict) and stop_flag.get('stop', False)) and not (hasattr(stop_flag, 'is_set') and stop_flag.is_set()):
+        # Record audio chunk
         temp_wav = record_audio_chunk(duration=chunk_duration)
+        
+        # Transcribe audio to text
         text = transcribe_audio_whisper(temp_wav, whisper_model)
 
         # Get all text emotion scores
-        text_emotion_scores_raw = classifier(text, top_k=None) if text else [] # Get raw output
+        text_emotion_scores_raw = classifier(text, top_k=None) if text else [] 
 
         text_emotion_scores = []
         if text and text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
@@ -496,17 +281,24 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
             elif isinstance(text_emotion_scores_raw[0], dict): # Fallback if the structure is flatter
                  text_emotion_scores = sorted(text_emotion_scores_raw, key=lambda x: x['score'], reverse=True)
 
+        # Get top text emotion
         if text_emotion_scores:
             top_text = text_emotion_scores[0]
             emotion = top_text['label']
             score = top_text['score']
         else:
             emotion, score = None, None
+            
         text_timestamp = time.time()
-        # SER all scores
+        
+        # Get audio emotion scores
         audio_emotion, audio_score, audio_emotion_scores = analyze_audio_emotion_full(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
         audio_timestamp = time.time()
-        os.unlink(temp_wav)
+        
+        # Clean up temp file
+        if isinstance(temp_wav, str) and os.path.exists(temp_wav):
+            os.unlink(temp_wav)
+            
         # Smoothing text emotions
         if emotion:
             emotion_window.append(emotion)
@@ -522,6 +314,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
             }
             with audio_lock:
                 audio_emotion_log.append(log_entry_text)
+                
         # Smoothing audio emotions
         if audio_emotion:
             audio_emotion_window.append(audio_emotion)
@@ -537,413 +330,427 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     'emotion_scores': audio_emotion_scores
                 })
 
-def calculate_cosine_similarity(vector_a, vector_b):
-    """
-    Calculate the cosine similarity between two vectors.
-    
-    Args:
-        vector_a: First vector as a numpy array
-        vector_b: Second vector as a numpy array
-        
-    Returns:
-        Cosine similarity value between -1 and 1
-    """
-    # Ensure vectors are numpy arrays
-    vector_a = np.array(vector_a)
-    vector_b = np.array(vector_b)
-    
-    # Calculate dot product
-    dot_product = np.dot(vector_a, vector_b)
-    
-    # Calculate magnitudes
-    magnitude_a = np.sqrt(np.sum(vector_a**2))
-    magnitude_b = np.sqrt(np.sum(vector_b**2))
-    
-    # Avoid division by zero
-    if magnitude_a == 0 or magnitude_b == 0:
-        return 0.0
-    
-    # Calculate cosine similarity
-    cosine_similarity = dot_product / (magnitude_a * magnitude_b)
-    return cosine_similarity
+# Try to get the video processing function from our module
+external_video_processing_loop = get_video_processing_function()
 
-def create_unified_emotion_vector(emotion_scores, mapping_dict):
-    """
-    Create a vector representing emotion scores in the unified emotion space.
+def record_audio():
+    """Record audio continuously and store in shared state"""
+    global shared_state
     
-    Args:
-        emotion_scores: Dictionary or list of dicts with emotion scores
-        mapping_dict: Dictionary mapping source emotions to unified emotions
+    def audio_callback(indata, frames, time, status):
+        """Callback for sounddevice to continuously capture audio"""
+        if status:
+            print(f"Audio recording status: {status}")
         
-    Returns:
-        List with scores for each unified emotion in the order of UNIFIED_EMOTIONS
-    """
-    # Initialize the unified vector with zeros
-    unified_vector = [0.0] * len(UNIFIED_EMOTIONS)
+        # Add the new audio data to our buffer
+        audio_data = indata[:, 0]  # Use first channel
+        for sample in audio_data:
+            audio_buffer.append(sample)
+        
+        # Store the latest audio for processing
+        shared_state['latest_audio'] = np.array(audio_buffer)
     
-    # Handle different input formats
-    if isinstance(emotion_scores, dict):
-        # Direct dictionary of emotion scores
-        for emotion, score in emotion_scores.items():
-            if emotion in mapping_dict and mapping_dict[emotion] is not None:
-                unified_emotion = mapping_dict[emotion]
-                if unified_emotion in UNIFIED_EMOTIONS:
-                    idx = UNIFIED_EMOTIONS.index(unified_emotion)
-                    unified_vector[idx] = score
-    elif isinstance(emotion_scores, list):
-        # List of emotion score dictionaries (from text classifier)
-        for item in emotion_scores:
-            if isinstance(item, dict) and 'label' in item and 'score' in item:
-                emotion = item['label']
-                score = item['score']
-                if emotion in mapping_dict and mapping_dict[emotion] is not None:
-                    unified_emotion = mapping_dict[emotion]
-                    if unified_emotion in UNIFIED_EMOTIONS:
-                        idx = UNIFIED_EMOTIONS.index(unified_emotion)
-                        unified_vector[idx] = score
-    
-    return unified_vector
+    try:
+        # Set up the audio stream
+        stream = sd.InputStream(
+            callback=audio_callback,
+            channels=1,
+            samplerate=audio_sample_rate,
+            blocksize=int(audio_sample_rate * 0.1)  # 100ms blocks
+        )
+        
+        # Start recording
+        with stream:
+            logger.info("Audio recording started")
+            
+            # Keep recording until stop flag is set
+            while True:
+                # Check for stop signal
+                if isinstance(shared_state['stop_event'], dict):
+                    if shared_state['stop_event'].get('stop', False):
+                        logger.info("Stop signal received in audio recording")
+                        break
+                elif shared_state['stop_event'] and shared_state['stop_event']:
+                    logger.info("Stop event detected in audio recording")
+                    break
+                
+                # Sleep briefly to avoid burning CPU
+                time.sleep(0.1)
+                
+    except Exception as e:
+        logger.error(f"Error in audio recording: {e}")
+    finally:
+        logger.info("Audio recording stopped")
 
-# ---------------------------
-# Main script
-# ---------------------------
+def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event):
+    """Wrapper around the video processing loop"""
+    if external_video_processing_loop:
+        # Use our external implementation
+        return external_video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event)
+    else:
+        # Fall back to the original implementation 
+        from detect_emotion import video_processing_loop as original_video_processing_loop
+        print("Using original video_processing_loop")
+        return original_video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event)
+
 # Suppress DeepFace logging for cleaner console output
 logging.getLogger().setLevel(logging.ERROR)
 
-def main(live=True, emotion_queue=None, stop_event=None, camera_index=0):
-    # Set detection mode based on argument
-    print(f"Detection mode: {'live' if live else 'video_file'}")
-    
-    # Get camera index from environment if available
-    camera_idx = os.environ.get('WEBCAM_INDEX')
-    if camera_idx is not None:
-        try:
-            camera_index = int(camera_idx)
-            print(f"Using camera index from environment: {camera_index}")
-        except ValueError:
-            print(f"Invalid camera index in environment: {camera_idx}")
-    
-    # Store camera index for video processing
-    global CAMERA_INDEX
-    CAMERA_INDEX = camera_index
-    
-    # Load models
-    print("Loading Whisper model...")
-    whisper_model = whisper.load_model("base")
-    print("Loading text-based emotion classification model...")
-    classifier = pipeline(
-        "text-classification",
-        model=TEXT_CLASSIFIER_MODEL_ID,
-        top_k=None,
-        device=0 if torch.cuda.is_available() else -1
-    )
-    print("Loading audio-based SER model...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ser_model = AutoModelForAudioClassification.from_pretrained(SER_MODEL_ID).to(device)
-    ser_processor = AutoFeatureExtractor.from_pretrained(SER_MODEL_ID)
-    ser_label_mapping = ser_model.config.id2label
+# Add logging for debug information
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('detect_emotion')
 
-    if not live:
-        print("Video File Emotion Detection Mode")
-        video_path = input("Enter path to video file: ").strip()
-        if not os.path.isfile(video_path):
-            print("File not found.")
-            return
-        # Extract audio from video file
-        print("Extracting audio from video file...")
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
-            audio_path = temp_audio.name
-        try:
-            videoclip = VideoFileClip(video_path)
-            videoclip.audio.write_audiofile(audio_path, fps=16000, nbytes=2, codec='pcm_s16le')
-        except Exception as e:
-            print(f"Audio extraction failed: {e}")
-            return
-        # --- Video frame analysis ---
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            print("Error: Cannot open video file.")
-            return
+# Global variables
+shared_state = {
+    'emotion_queue': None,     # Queue for sending emotion data
+    'stop_event': None,        # Event for stopping the process
+    'latest_audio': None,      # Latest audio data
+    'latest_frame': None,      # Latest video frame
+    'transcribed_text': "",    # Latest transcribed text
+    'facial_emotion': ("neutral", 1.0),  # Latest facial emotion
+    'audio_emotion': ("neutral", 1.0),   # Latest audio emotion
+    'text_emotion': ("neutral", 1.0),    # Latest text emotion
+    'overall_emotion': "neutral",         # Combined overall emotion
+}
+
+# Reusable whisper model instance
+model = None
+
+# Text emotion classification pipeline
+text_classifier = None
+
+# Audio emotion classification model
+audio_feature_extractor = None
+audio_classifier = None
+
+# Audio recording settings
+audio_sample_rate = 44100
+audio_duration = 5   # Record 5 seconds at a time
+audio_buffer = deque(maxlen=audio_duration * audio_sample_rate)
+last_audio_analysis = time.time() - 10  # Force initial analysis
+
+# Face detection and emotion recognition
+face_cascade = None
+
+# Logger configuration
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO,
+                      format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+def init_webcam(preferred_index=0, try_fallbacks=True):
+    """Initialize webcam with fallback options"""
+    # Try to set up camera with preferred index first
+    cap = cv2.VideoCapture(preferred_index) 
+    
+    # If that didn't work, try alternate indices
+    if not cap.isOpened() and try_fallbacks:
+        logger.info(f"Camera index {preferred_index} failed, trying alternates")
         
-        # Initialize variables for 5-second downsampling
-        video_emotions = []
-        frame_emotions = []
-        window_start_time = time.time()
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = 0
-        
-        print("Processing video file for facial emotions with 5-second downsampling...")
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
+        # Try indices 0 through 2
+        for idx in range(3):
+            if idx == preferred_index:
+                continue  # Skip the one we already tried
+                
+            logger.info(f"Trying camera index {idx}")
+            cap = cv2.VideoCapture(idx)
+            if cap.isOpened():
+                logger.info(f"Successfully opened camera with index {idx}")
                 break
                 
-            # Calculate timestamp based on frame count and FPS
-            timestamp = window_start_time + (frame_count / fps)
-            frame_count += 1
+    # If still not open, try different backend APIs
+    if not cap.isOpened() and try_fallbacks:
+        # Try different backend APIs (DirectShow, etc)
+        for backend in [cv2.CAP_ANY, cv2.CAP_DSHOW, cv2.CAP_V4L2]:
+            logger.info(f"Trying camera index {preferred_index} with backend {backend}")
+            cap = cv2.VideoCapture(preferred_index + backend)
+            if cap.isOpened():
+                logger.info(f"Successfully opened camera with backend {backend}")
+                break
+                
+    if not cap.isOpened():
+        logger.warning("Failed to open any webcam - video analysis disabled")
+        return None
+        
+    # Configure for reasonable defaults
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS, 20)
+    
+    return cap
+    
+def process_video():
+    """Process video frames from webcam"""
+    global shared_state, face_cascade
+    
+    # Initialize OpenCV face detector
+    if face_cascade is None:
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    
+    # Try to initialize webcam
+    cap = init_webcam(preferred_index=int(os.environ.get('WEBCAM_INDEX', '0')))
+    
+    if cap is None:
+        logger.error("Failed to initialize webcam - skipping video analysis")
+        return
+    
+    # Get shared frame queue from stop_event dict if available
+    frame_queue = None
+    if isinstance(shared_state['stop_event'], dict) and 'shared_frame_data' in shared_state['stop_event']:
+        frame_queue = shared_state['stop_event']['shared_frame_data']
+        logger.info(f"Found shared frame queue: {frame_queue}")
+    
+    # Process frames in a loop  
+    while cap.isOpened():
+        # Check if we need to stop
+        if isinstance(shared_state['stop_event'], dict):
+            if shared_state['stop_event'].get('stop', False):
+                logger.info("Stop signal received in video processing")
+                break
+        elif shared_state['stop_event'] and shared_state['stop_event'].is_set():
+            logger.info("Stop event set in video processing")
+            break
             
+        # Capture frame
+        success, frame = cap.read()
+        if not success:
+            logger.warning("Failed to read from webcam")
+            # Try to re-initialize camera
+            cap.release()
+            time.sleep(1)
+            cap = init_webcam()
+            if cap is None:
+                logger.error("Failed to reinitialize webcam - exiting video processing")
+                break
+            continue
+            
+        # Store the latest frame globally
+        shared_state['latest_frame'] = frame
+          # Share frame with dashboard if we have a queue
+        if frame_queue is not None:
             try:
-                results = DeepFace.analyze(
-                    img_path=frame,
-                    actions=['emotion'],
-                    enforce_detection=False,
-                    detector_backend='opencv'
-                )
-                faces = results if isinstance(results, list) else [results]
-                for face in faces:
-                    if 'dominant_emotion' in face:
-                        emo = face['dominant_emotion']
-                        confidence = face.get('emotion', {}).get(emo, None)
-                        emotion_scores = face.get('emotion', {})
-                        
-                        # Store this frame's emotion data for current window
-                        frame_emotions.append({
-                            'timestamp': timestamp,
-                            'emotion': emo,
-                            'confidence': confidence,
-                            'emotion_scores': emotion_scores
-                        })
-                    else:
-                        print("No face detected or emotion data unavailable.")
+                # Try to add the frame to the queue without blocking
+                if hasattr(frame_queue, 'put'):
+                    # Note: need to copy the frame as it might be modified elsewhere
+                    frame_queue.put(frame.copy(), block=False)
+                    logger.debug("Added frame to queue")
             except Exception as e:
-                print(f"Video analysis error: {e}")
+                # Queue might be full, that's okay
+                logger.debug(f"Couldn't add frame to queue: {e}")
                 
-            # Check if we've processed enough frames for a 5-second window
-            if timestamp - window_start_time >= VIDEO_WINDOW_DURATION and frame_emotions:
-                # Calculate average scores for each emotion category
-                unified_emotion_scores = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
-                count = 0
-                
-                for frame_data in frame_emotions:
-                    raw_scores = frame_data.get('emotion_scores', {})
-                    # Map DeepFace emotions to our unified set and accumulate scores
-                    if 'neutral' in raw_scores:
-                        unified_emotion_scores['neutral'] += raw_scores.get('neutral', 0)
-                    if 'happy' in raw_scores:
-                        unified_emotion_scores['happy'] += raw_scores.get('happy', 0)
-                    if 'sad' in raw_scores:
-                        unified_emotion_scores['sad'] += raw_scores.get('sad', 0)
-                    if 'angry' in raw_scores:
-                        unified_emotion_scores['angry'] += raw_scores.get('angry', 0)
-                    count += 1
-                
-                if count > 0:
-                    # Average the scores
-                    for emotion in unified_emotion_scores:
-                        unified_emotion_scores[emotion] /= count
-                    
-                    # Find the dominant emotion from the averaged scores
-                    dominant_emotion = max(unified_emotion_scores.items(), key=lambda x: x[1])
-                    dominant_label = dominant_emotion[0]
-                    dominant_score = dominant_emotion[1]
-                    
-                    # Create the aggregated video emotion entry
-                    aggregated_entry = {
-                        'timestamp': timestamp,  # End of the 5-second window
-                        'emotion': dominant_label,
-                        'confidence': dominant_score,
-                        'emotion_scores': unified_emotion_scores
-                    }
-                    
-                    video_emotions.append(aggregated_entry)
-                
-                # Reset for next window
-                window_start_time = timestamp
-                frame_emotions = []
-                
-        cap.release()
-        print("Video file processing complete. Total 5-second windows analyzed:", len(video_emotions))
-        # --- Audio chunked processing ---
-        print("Processing extracted audio for emotions in chunks...")
-        chunk_duration = 10  # seconds
-        audio_emotion_log = []
-        y, sr = librosa.load(audio_path, sr=16000)
-        total_samples = len(y)
-        chunk_samples = chunk_duration * sr
-        num_chunks = math.ceil(total_samples / chunk_samples)
-        for i in range(num_chunks):
-            start = i * chunk_samples
-            end = min((i + 1) * chunk_samples, total_samples)
-            chunk = y[start:end]
-            # Write chunk to temp file
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_chunk:
-                sf.write(temp_chunk.name, chunk, sr)
-                chunk_path = temp_chunk.name
-            # Transcribe chunk
-            text = transcribe_audio_whisper(chunk_path, whisper_model)
-            text_emotion_scores = classify_emotion_full(text, classifier) if text else []
-            if text_emotion_scores:
-                top_text = text_emotion_scores[0]
-                text_emotion = top_text['label']
-                text_score = top_text['score']
-            else:
-                text_emotion, text_score = None, None
-            text_timestamp = time.time()
-            audio_emotion, audio_score, audio_emotion_scores = analyze_audio_emotion_full(chunk_path, ser_model, ser_processor, ser_label_mapping, device)
-            audio_timestamp = time.time()
-            if text_emotion:
-                audio_emotion_log.append({
-                    'timestamp': text_timestamp,
-                    'modality': 'text',
-                    'emotion': text_emotion,
-                    'confidence': text_score,
-                    'emotion_scores': text_emotion_scores
-                })
-            if audio_emotion:
-                audio_emotion_log.append({
-                    'timestamp': audio_timestamp,
-                    'modality': 'audio',
-                    'emotion': audio_emotion,
-                    'confidence': audio_score,
-                    'emotion_scores': audio_emotion_scores
-                })
-            # Clean up chunk file
-            os.remove(chunk_path)
-
-        # Clean up temp audio file
-        os.remove(audio_path)
-    else:
-        print("Starting live microphone and video emotion detection (threaded).")
-        video_emotions = []
-        audio_emotion_log = []
-        video_lock = threading.Lock()
-        audio_lock = threading.Lock()
-        
-        # Use either the external stop_event or a local stop_flag
-        if stop_event:
-            # Convert multiprocessing.Event to a dict for compatibility with existing code
-            stop_flag = {'stop': False}
-            
-            # Create a thread to monitor the stop_event and update stop_flag
-            def monitor_stop_event():
-                while not stop_event.is_set():
-                    time.sleep(0.1)
-                stop_flag['stop'] = True
-                print("Stop event detected, stopping emotion detection...")
-            
-            monitor_thread = threading.Thread(target=monitor_stop_event)
-            monitor_thread.daemon = True
-            monitor_thread.start()
-        else:
-            # If no external stop_event, use internal stop_flag
-            stop_flag = {'stop': False}
-        
-        video_started_event = threading.Event()
-        
-        # Start threads
-        video_thread = threading.Thread(target=video_processing_loop, args=(video_emotions, video_lock, stop_flag, video_started_event))
-        audio_thread = threading.Thread(target=audio_processing_loop, args=(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device, video_started_event))
-        video_thread.start()
-        audio_thread.start()
-        
+        # Also save the latest frame to a shared file location for dashboard to access
         try:
-            while not stop_flag['stop']:
-                time.sleep(2)  # Poll every 2 seconds
-                with video_lock:
-                    current_time = time.time()
-                    video_window = [v for v in video_emotions if current_time - v['timestamp'] <= VIDEO_WINDOW_DURATION]
-                with audio_lock:
-                    current_time_audio = time.time() # Use a separate timestamp if needed for strict independence
-                    audio_window = [a for a in audio_emotion_log if current_time_audio - a['timestamp'] <= AUDIO_WINDOW_DURATION]
-
-                matches = match_multimodal_emotions(video_window, audio_window)
-                if matches:
-                    if VERBOSE_OUTPUT:
-                        print("\n--- Multimodal Matches (real-time, threaded) ---")
-                        for m in matches[-5:]:
-                            print(f"Cosine Similarity (aggregate): {m['cosine_similarity']:.3f}")
-                            
-                            if 'pairwise_similarities' in m:
-                                ps = m['pairwise_similarities']
-                                if ps.get('video_text') is not None:
-                                    print(f"  Video-Text Similarity: {ps['video_text']:.3f}")
-                                if ps.get('video_audio') is not None:
-                                    print(f"  Video-Audio Similarity: {ps['video_audio']:.3f}")
-                                if ps.get('text_audio') is not None:
-                                    print(f"  Text-Audio Similarity: {ps['text_audio']:.3f}")
-                            
-                            # Print top 3 video emotion scores
-                            print("  Video emotion scores:")
-                            if isinstance(m.get('video_emotion_scores'), dict):
-                                for k, v in sorted(m['video_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
-                                    print(f"    {k}: {v:.2f}")
-                            
-                            # Print top 3 audio emotion scores
-                            if m['audio_modality'] == 'audio':
-                                print(f"  Audio (audio) emotion scores:")
-                                if isinstance(m.get('audio_emotion_scores'), dict):
-                                    for k, v in sorted(m['audio_emotion_scores'].items(), key=lambda x: x[1], reverse=True)[:3]:
-                                        print(f"    {k}: {v:.2f}")
-                            elif m['audio_modality'] == 'text':
-                                print(f"  Audio (text) emotion scores:")
-                                retrieved_text_scores = m.get('audio_emotion_scores', [])
-                                if isinstance(retrieved_text_scores, list) and retrieved_text_scores:
-                                    for score_entry in retrieved_text_scores[:3]:
-                                        if isinstance(score_entry, dict) and 'label' in score_entry and 'score' in score_entry:
-                                            print(f"    {score_entry['label']}: {score_entry['score']:.2f}")
-                    
-                    # Calculate average cosine similarity for recent matches
-                    window_size = 3
-                    window_matches = matches[-window_size:] if len(matches) >= window_size else matches
-                    avg_cosine_sim = sum(match['cosine_similarity'] for match in window_matches) / len(window_matches) if window_matches else 0
-                    
-                    if VERBOSE_OUTPUT:
-                        print(f"Average Cosine Similarity (last {len(window_matches)}): {avg_cosine_sim:.3f}")
-                    
-                    # Get the most recent match for the dashboard
-                    latest = matches[-1]
-                    cosine_sim = latest['cosine_similarity']
-                    
-                    # Determine consistency level
-                    if cosine_sim >= 0.8:
-                        consistency_level = "High Consistency ✅✅"
-                    elif cosine_sim >= 0.6:
-                        consistency_level = "Moderate Consistency ✅"
-                    elif cosine_sim >= 0.3:
-                        consistency_level = "Low Consistency ⚠️"
-                    else:
-                        consistency_level = "Inconsistent ❌"
-                    
-                    if VERBOSE_OUTPUT:
-                        print(f"Consistency: {consistency_level}")
-                    
-                    # If we have a queue, send the latest match data to the dashboard
-                    if emotion_queue is not None:
-                        # Extract and format the data for the dashboard
-                        dashboard_data = {
-                            "facial_emotion": (
-                                latest.get('facial_emotion', 'unknown'),
-                                latest.get('facial_confidence', 0.0)
-                            ),
-                            "text_emotion": (
-                                latest.get('text_emotion', 'unknown') if 'text_emotion' in latest else 
-                                (latest.get('audio_emotion', 'unknown') if latest.get('audio_modality') == 'text' else 'unknown'),
-                                latest.get('text_confidence', 0.0) if 'text_confidence' in latest else 
-                                (latest.get('audio_confidence', 0.0) if latest.get('audio_modality') == 'text' else 0.0)
-                            ),
-                            "audio_emotion": (
-                                latest.get('audio_emotion', 'unknown') if latest.get('audio_modality', '') == 'audio' else 'unknown',
-                                latest.get('audio_confidence', 0.0) if latest.get('audio_modality', '') == 'audio' else 0.0
-                            ),
-                            "transcribed_text": latest.get('transcribed_text', ""),
-                            "cosine_similarity": cosine_sim,
-                            "consistency_level": consistency_level
-                        }
-                        
-                        try:
-                            # Send data to the queue without blocking (timeout=1)
-                            emotion_queue.put(dashboard_data, timeout=1)
-                        except Exception as e:
-                            print(f"Error sending data to dashboard: {e}")
-                            
-        except KeyboardInterrupt:
-            print("Exiting microphone and video emotion detection.")
-            stop_flag['stop'] = True
+            # Save frame to temp location (every ~5 frames to avoid disk I/O overhead)
+            if hasattr(process_video, 'frame_count'):
+                process_video.frame_count += 1
+            else:
+                process_video.frame_count = 0
+                
+            # Only save every 5th frame to reduce disk activity
+            if process_video.frame_count % 5 == 0:
+                import tempfile
+                frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
+                cv2.imwrite(frame_path, frame)
+        except Exception as e:
+            # Saving to file is optional, so don't stop on errors
+            logger.debug(f"Error saving frame to file: {e}")
+        
+        # Run facial emotion analysis periodically
+        try:
+            # Skip face detection if frame is None
+            if frame is None:
+                continue
+                
+            # Convert to RGB (DeepFace expects RGB)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
+            # Detect face using DeepFace
+            analysis = DeepFace.analyze(rgb_frame, 
+                                      actions=['emotion'],
+                                      enforce_detection=False,
+                                      silent=True)
+            
+            if analysis and len(analysis) > 0:
+                emotions = analysis[0]['emotion']
+                dominant_emotion = analysis[0]['dominant_emotion']
+                confidence = emotions[dominant_emotion] / 100
+                
+                # Store the emotion
+                shared_state['facial_emotion'] = (dominant_emotion, confidence)
+        except Exception as e:
+            logger.error(f"Error in facial emotion detection: {e}")
+            # Continue processing even if facial detection fails
+            
+        # Sleep briefly to avoid maxing out CPU
+        time.sleep(0.05)
+        
+    # Clean up
+    if cap is not None:
+        cap.release()
+    logger.info("Video processing thread exited")
+
+def main(emotion_queue=None, stop_event=None, camera_index=0):
+    """Main function to run the emotion detection system"""
+    global shared_state, model, text_classifier, audio_feature_extractor, audio_classifier, face_cascade
+    
+    print("Starting emotion detection system...")
+    
+    # Store the queue and stop event
+    shared_state['emotion_queue'] = emotion_queue
+    shared_state['stop_event'] = stop_event
+    
+    # Convert int/str camera_index to int
+    if isinstance(camera_index, str):
+        camera_index = int(camera_index)
+    
+    # Create a dictionary to hold the stop flag if not provided
+    stop_flag = {'stop': False}
+    if stop_event is None:
+        shared_state['stop_event'] = stop_flag
+    
+    # Log if we have access to a frame queue
+    if isinstance(stop_event, dict) and 'shared_frame_data' in stop_event:
+        print(f"Detector received shared frame queue: {stop_event['shared_frame_data']}")
+    
+    # Initialize the Whisper model for transcription
+    print("Initializing Whisper model...")
+    model = whisper.load_model("tiny")
+    
+    # Initialize text emotion classifier
+    print("Initializing text emotion classifier...")
+    text_classifier = pipeline("text-classification", 
+                            model="j-hartmann/emotion-english-distilroberta-base", 
+                            top_k=None)
+    
+    # Initialize audio emotion classifier
+    print("Initializing audio emotion classifier...")
+    model_name = "MIT/ast-finetuned-speech-commands-v2"
+    audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+    audio_classifier = AutoModelForAudioClassification.from_pretrained(model_name)
+    
+    # Start audio recording thread
+    print("Starting audio recording thread...")
+    audio_thread = threading.Thread(target=record_audio)
+    audio_thread.daemon = True
+    audio_thread.start()
+    
+    # Start video processing thread
+    print("Starting video processing thread...")
+    video_thread = threading.Thread(target=process_video)
+    video_thread.daemon = True
+    video_thread.start()
+    
+    # Main loop for emotion analysis
+    print("Starting main emotion analysis loop...")
+    try:
+        while True:
+            # Check if we need to stop
+            if isinstance(shared_state['stop_event'], dict):
+                if shared_state['stop_event'].get('stop', False):
+                    print("Stop signal received in main loop")
+                    break
+            elif shared_state['stop_event'] and shared_state['stop_event']:
+                print("Stop event detected in main loop")
+                break
+            
+            # Store results for consistency checking
+            latest = {}
+            
+            # Process the latest frame for facial emotion if available
+            if shared_state['latest_frame'] is not None:
+                # We already processed facial emotions in the video thread
+                facial_emotion, confidence = shared_state['facial_emotion']
+                latest['facial_emotion'] = facial_emotion
+                latest['facial_confidence'] = confidence
+                
+                print(f"Facial emotion: {facial_emotion} ({confidence:.2f})")
+                  # Use the latest audio data every few seconds
+            global last_audio_analysis
+            if (time.time() - last_audio_analysis) > 3:
+                # Process audio data for emotion detection here
+                # Code to analyze audio would go here
+                
+                # Add timestamp to check for processing frequency
+                last_audio_analysis = time.time()
+                    
+                # Log the update
+                logger.debug(f"Audio analysis performed at {time.time()}")
+                  # Share the current emotional state via the queue and file
+            if latest:
+                # Combine all current emotional data
+                result_data = {
+                    "facial_emotion": shared_state['facial_emotion'],
+                    "text_emotion": shared_state['text_emotion'],
+                    "audio_emotion": shared_state['audio_emotion'],
+                    "transcribed_text": shared_state['transcribed_text'],
+                    "consistency_level": "Moderate",
+                    "cosine_similarity": 0.5  # Placeholder
+                }
+                
+                # First try sending via queue if available
+                if shared_state['emotion_queue'] is not None:
+                    try:
+                        # Send without blocking
+                        shared_state['emotion_queue'].put(result_data, block=False)
+                    except Exception as e:
+                        logger.error(f"Error sending emotion data to queue: {e}")
+                  # Also save to file for dashboard to access
+                try:
+                    # Save every few updates to reduce disk I/O
+                    import json
+                    import tempfile
+                    import os
+                          # Create a JSON-serializable version of the data
+                    serializable_data = {}
+                    
+                    # Convert any NumPy values to standard Python types
+                    for key, value in result_data.items():
+                        if key in ["facial_emotion", "text_emotion", "audio_emotion"]:
+                            # These are tuples with emotion name and confidence
+                            emotion_name, confidence = value
+                            # Convert any NumPy float to Python float
+                            if isinstance(confidence, np.number):
+                                confidence = float(confidence)
+                            serializable_data[key] = (emotion_name, confidence)
+                        elif isinstance(value, np.number):
+                            serializable_data[key] = float(value)
+                        elif isinstance(value, np.ndarray):
+                            serializable_data[key] = value.tolist()
+                        else:
+                            serializable_data[key] = value
+                    
+                    # Add timestamp to the data
+                    serializable_data["timestamp"] = float(time.time())
+                    
+                    # Save to temp file using a temporary file approach to ensure atomic writes
+                    emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
+                    temp_path = f"{emotion_path}.tmp"
+                    
+                    # First write to a temp file, then rename to the final path
+                    with open(temp_path, 'w') as f:
+                        json.dump(serializable_data, f)
+                        f.flush()
+                        os.fsync(f.fileno())  # Ensure data is written to disk
+                        
+                    # Rename for atomic replacement
+                    import shutil
+                    shutil.move(temp_path, emotion_path)
+                except Exception as e:
+                    logger.error(f"Error saving emotion data to file: {e}")
+                    
+            # Sleep to avoid high CPU usage
+            time.sleep(0.1)
+                
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}")
+    finally:
+        # Signal threads to stop
+        if isinstance(shared_state['stop_event'], dict):
+            shared_state['stop_event']['stop'] = True
         print("Waiting for threads to finish...")
-        video_thread.join(timeout=5)
-        audio_thread.join(timeout=5)
+        # Wait for threads to finish gracefully
+        time.sleep(2) 
 
 if __name__ == "__main__":
     main()

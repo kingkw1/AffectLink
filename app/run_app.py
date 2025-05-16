@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_app_fixed.py - Enhanced main script for AffectLink with improved frame sharing
+run_app.py - Main script for AffectLink with improved frame sharing
 between the emotion detection and dashboard processes.
 """
 
@@ -30,14 +30,9 @@ def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
     """Run the emotion detection process with queue for IPC"""
     print("Starting emotion detection process...")
     try:
-        # Try to import our fixed version first
-        try:
-            import detect_emotion_fixed as detect_emotion
-            print("Using detect_emotion_fixed module")
-        except ImportError:
-            # Fall back to original if fixed version isn't available
-            import detect_emotion
-            print("Using original detect_emotion module")
+        # Import the emotion detection module
+        import detect_emotion
+        print("Using detect_emotion module")
             
         # Get camera index from environment if available
         camera_index = int(os.environ.get('WEBCAM_INDEX', '0'))
