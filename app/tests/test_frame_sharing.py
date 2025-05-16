@@ -7,16 +7,20 @@ import cv2
 import os
 import sys
 import time
-import threading
 import multiprocessing
 import subprocess
 import signal
-from camera_utils import find_available_camera
 
-# Add the current directory to sys.path to import local modules
+# Add the parent directory to sys.path to import app modules
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
+# Define current directory and app directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
+app_dir = parent_dir
+    
+from camera_utils import find_available_camera
 
 def camera_process(frame_queue, stop_event):
     """Process that captures camera frames and shares them via the queue"""
@@ -79,12 +83,10 @@ if __name__ == "__main__":
     cam_process = multiprocessing.Process(
         target=camera_process,
         args=(frame_queue, stop_event)
-    )
-    
-    # Start Streamlit dashboard
-    dashboard_path = os.path.join(current_dir, "dashboard.py")
+    )    # Start Streamlit dashboard
+    dashboard_path = os.path.join(app_dir, "dashboard.py")
     streamlit_process = subprocess.Popen(
-        ["streamlit", "run", dashboard_path],
+        ["streamlit", "run", dashboard_path, "--logger.level=error", "--server.headless=true"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )

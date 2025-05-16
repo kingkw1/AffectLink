@@ -3,10 +3,16 @@
 Testing camera functionality with our new camera utilities.
 """
 
-import cv2
-import time
-from camera_utils import find_available_camera
 import os
+import sys
+import cv2
+
+# Add the parent directory to sys.path to import app modules
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+    
+from camera_utils import find_available_camera
 
 def test_webcam():
     print("Testing webcam availability with camera_utils.find_available_camera...")

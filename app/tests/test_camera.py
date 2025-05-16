@@ -1,5 +1,4 @@
 import cv2
-import time
 
 def test_camera_indices():
     """Test all camera indices from 0-10 to find available cameras"""
