@@ -43,9 +43,12 @@ def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
         camera_index = int(os.environ.get('WEBCAM_INDEX', '0'))
         print(f"Using camera index: {camera_index}")
         
-        # Modified to use a dictionary for the stop flag and shared data
-        # This combines stop_event functionality with frame sharing
-        shared_stop_dict = {'stop': False, 'shared_frame_data': shared_frame_queue}
+        # Pass the frame queue directly in the shared_stop_dict
+        shared_stop_dict = {
+            'stop': False, 
+            'shared_frame_data': shared_frame_queue
+        }
+        print(f"Frame queue is None? {shared_frame_queue is None}")
         
         # Create a thread to monitor the real stop_event and update our dict
         def monitor_stop_event():
@@ -162,10 +165,34 @@ def main():
     # Give the detector process a moment to initialize
     time.sleep(2)
     
-    # Streamlit dashboard should be run in a separate terminal to avoid warnings
-    print("AffectLink detector is running. To view the dashboard, open a new shell and run:")
-    print(f"    streamlit run {os.path.join(current_dir, 'dashboard.py')} --logger.level=error")
-    dashboard_process = None
+    # Create a simpler approach for dashboard integration
+    print("Starting AffectLink dashboard automatically...")
+    
+    # Set an environment variable so the dashboard knows a detector is running
+    os.environ["AFFECTLINK_DETECTOR_RUNNING"] = "1"
+    
+    try:
+        # Launch the dashboard using Streamlit
+        dashboard_cmd = [
+            sys.executable, "-m", "streamlit", "run", 
+            os.path.join(current_dir, "dashboard.py"),
+            "--logger.level=error"
+        ]
+        
+        print(f"Running dashboard with command: {' '.join(dashboard_cmd)}")
+        dashboard_process = subprocess.Popen(
+            dashboard_cmd,
+            env=os.environ.copy()
+        )
+        print("Dashboard started with Streamlit")
+        
+        # Provide instructions for manual launch if needed
+        print("If the dashboard doesn't appear, you can launch it manually with:")
+        print(f"    cd {current_dir} && streamlit run dashboard.py --logger.level=error")
+    except Exception as e:
+        print(f"Warning: Could not start dashboard automatically: {e}")
+        print("You can manually start the dashboard with:")
+        print(f"    cd {current_dir} && streamlit run dashboard.py")
     
     try:
         print("Starting AffectLink multimodal emotion analysis system...")
@@ -178,7 +205,6 @@ def main():
                 stop_event.set()
                 break
             # Dashboard is run in a child process; we do not terminate on its exit
-            pass
                 
     except KeyboardInterrupt:
         print("Keyboard interrupt received. Shutting down...")

@@ -17,6 +17,7 @@ from collections import deque
 import os
 import sys
 import multiprocessing
+from multiprocessing.queues import Empty as MPQueueEmpty
 
 # Add the current directory to sys.path to import local modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +26,9 @@ if current_dir not in sys.path:
 
 # Import shared data structures from detect_emotion.py
 # We'll use a queue-based approach for communication between processes
+
+# Dev mode flag for standalone testing
+DEV_MODE = True if __name__ == "__main__" else False
 
 import queue  # Local placeholder
 # Global queues, will be set in main()
@@ -95,23 +99,45 @@ def update_dashboard():
         try:
             latest_data = ui_update_queue.get_nowait()
         except queue.Empty:
-            pass
-
-    # Get latest video frame
+            pass    # Get latest video frame
     frame = None
     try:
         # Check if we have a shared queue or a local queue
-        if hasattr(video_frame_queue, 'get_nowait'):
+        if video_frame_queue and hasattr(video_frame_queue, 'get_nowait'):
             # Try to get a frame without blocking
-            frame = video_frame_queue.get_nowait()
-        elif hasattr(video_frame_queue, 'get'):
+            try:
+                frame = video_frame_queue.get_nowait()
+            except (queue.Empty, MPQueueEmpty):
+                # No new frame available
+                pass
+        elif video_frame_queue and hasattr(video_frame_queue, 'get'):
             # For multiprocessing.Queue
             try:
                 frame = video_frame_queue.get(block=False)
-            except Exception:
+            except (MPQueueEmpty, Exception):
                 pass
-    except queue.Empty:
-        # No new frame available
+                
+        # If we couldn't get a frame from the queue, check for saved frame file
+        if frame is None:
+            # Check for frame saved to temporary file by detector
+            import tempfile
+            import os
+            
+            frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
+            if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
+                try:
+                    # Track file modification time to avoid reloading the same frame repeatedly
+                    mod_time = os.path.getmtime(frame_path)
+                    
+                    # Only load if file has been modified since last check
+                    if not hasattr(update_dashboard, 'last_frame_time') or mod_time > update_dashboard.last_frame_time:
+                        frame = cv2.imread(frame_path)
+                        update_dashboard.last_frame_time = mod_time
+                except Exception as e:
+                    print(f"Error reading frame file: {e}")
+            
+    except Exception as e:
+        print(f"Error retrieving video frame: {e}")
         pass
         
     if frame is not None:
@@ -165,19 +191,47 @@ def receive_emotion_data_thread(mp_queue, stop_event):
             print("Stop event detected in emotion data receiver thread")
             break
 
+        # First try to get data from the queue if available
+        if mp_queue:
+            try:
+                # Try to get data from the multiprocessing queue with a timeout
+                data = mp_queue.get(timeout=0.1)  # Use shorter timeout to check file more frequently
+                # Pass data to the UI update queue
+                ui_update_queue.put(data)
+                continue  # Skip file check if we got data from queue
+            except (queue.Empty, MPQueueEmpty):
+                # If no data is available, we'll check the file next
+                pass
+            except Exception as e:
+                print(f"Error receiving emotion data from queue: {e}")
+
+        # Check for emotion data saved to file as backup
         try:
-            # Try to get data from the multiprocessing queue with a timeout
-            data = mp_queue.get(timeout=0.5)
-
-            # Pass data to the UI update queue
-            ui_update_queue.put(data)
-
-        except (queue.Empty, multiprocessing.queues.Empty):
-            # If no data is available, continue the loop
-            time.sleep(0.1)
+            import os
+            import tempfile
+            import json
+            
+            emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
+            if os.path.exists(emotion_path):
+                # Check file modification time to avoid reloading same data
+                mod_time = os.path.getmtime(emotion_path)
+                
+                # Only process if file has been modified since last check
+                if not hasattr(receive_emotion_data_thread, 'last_emotion_time') or mod_time > receive_emotion_data_thread.last_emotion_time:
+                    with open(emotion_path, 'r') as f:
+                        try:
+                            data = json.load(f)
+                            # Pass data to the UI update queue
+                            ui_update_queue.put(data)
+                            receive_emotion_data_thread.last_emotion_time = mod_time
+                        except json.JSONDecodeError:
+                            # File might be partially written, skip for now
+                            pass
         except Exception as e:
-            print(f"Error receiving emotion data: {e}")
-            time.sleep(0.1)
+            print(f"Error checking emotion file: {e}")
+            
+        # Short sleep to avoid burning CPU
+        time.sleep(0.1)
 
 # Main Streamlit app
 st.set_page_config(
@@ -250,7 +304,130 @@ def main(emotion_queue=None, stop_event=None, frame_queue=None):
 
 # If run directly (for testing)
 if __name__ == "__main__":
-    # For standalone testing without Manager, use local queues
-    local_frame_queue = queue.Queue(maxsize=5)
-    local_emotion_queue = queue.Queue(maxsize=10)
-    main(local_emotion_queue, None, local_frame_queue)
+    # Check for environment variable that indicates if detector is running
+    import os
+    detector_running = os.environ.get("AFFECTLINK_DETECTOR_RUNNING") == "1"
+    
+    print(f"Detector running: {detector_running}")
+    
+    if detector_running:
+        # Check for temporary files from detector
+        import tempfile
+        frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
+        emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
+        
+        # Create empty queues to pass to main
+        frame_queue = queue.Queue(maxsize=5)
+        emotion_queue = queue.Queue(maxsize=10)
+        
+        print(f"Running in detector-connected mode")
+        print(f"Will look for frames at: {frame_path}")
+        print(f"Will look for emotions at: {emotion_path}")
+        
+        # Run main with the queues
+        main(emotion_queue, None, frame_queue)
+    else:
+        # Run in demo mode with generated data
+        print("Starting dashboard in standalone demo mode")
+        # For standalone testing without Manager, use local queues
+        local_frame_queue = queue.Queue(maxsize=5)
+        local_emotion_queue = queue.Queue(maxsize=10)
+        
+        # Create a demo thread to simulate frames and emotion data
+        def demo_data_provider():
+            """Generate demo data for testing the dashboard standalone"""
+            import numpy as np
+            import time
+            
+            while True:
+                # Create a demo frame (black with timestamp)
+                frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                timestamp = time.strftime("%H:%M:%S")
+                cv2.putText(frame, f"Demo Mode - {timestamp}", (20, 50), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                
+                # Add the frame to the queue
+                try:
+                    local_frame_queue.put(frame, block=False)
+                except queue.Full:
+                    pass
+                    
+                # Create demo emotion data
+                import random
+                emotions = ['neutral', 'happy', 'sad', 'angry']
+                demo_data = {
+                    "facial_emotion": (random.choice(emotions), random.random()),
+                    "text_emotion": (random.choice(emotions), random.random()),
+                    "audio_emotion": (random.choice(emotions), random.random()),
+                    "transcribed_text": f"Demo transcription at {timestamp}",
+                    "cosine_similarity": random.random(),
+                    "consistency_level": "Demo Consistency"
+                }
+                
+                try:
+                    local_emotion_queue.put(demo_data, block=False)
+                except queue.Full:
+                    pass
+                    
+                time.sleep(1)
+        
+        # Start the demo thread
+        demo_thread = threading.Thread(target=demo_data_provider)
+        demo_thread.daemon = True
+        demo_thread.start()
+        
+        # Run the dashboard with our local demo queues
+        main(local_emotion_queue, None, local_frame_queue)
+        
+    # If we couldn't connect to Manager queues, use demo mode
+    if use_demo:
+        print("Starting dashboard in standalone demo mode")
+        # For standalone testing without Manager, use local queues
+        local_frame_queue = queue.Queue(maxsize=5)
+        local_emotion_queue = queue.Queue(maxsize=10)
+        
+        # Create a demo thread to simulate frames and emotion data
+        def demo_data_provider():
+            """Generate demo data for testing the dashboard standalone"""
+            import numpy as np
+            import time
+            
+            while True:
+                # Create a demo frame (black with timestamp)
+                frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                timestamp = time.strftime("%H:%M:%S")
+                cv2.putText(frame, f"Demo Mode - {timestamp}", (20, 50), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                
+                # Add the frame to the queue
+                try:
+                    local_frame_queue.put(frame, block=False)
+                except queue.Full:
+                    pass
+                    
+                # Create demo emotion data
+                import random
+                emotions = ['neutral', 'happy', 'sad', 'angry']
+                demo_data = {
+                    "facial_emotion": (random.choice(emotions), random.random()),
+                    "text_emotion": (random.choice(emotions), random.random()),
+                    "audio_emotion": (random.choice(emotions), random.random()),
+                    "transcribed_text": f"Demo transcription at {timestamp}",
+                    "cosine_similarity": random.random(),
+                    "consistency_level": "Demo Consistency"
+                }
+                
+                try:
+                    local_emotion_queue.put(demo_data, block=False)
+                except queue.Full:
+                    pass
+                    
+                time.sleep(1)
+        
+        # Start the demo thread
+        demo_thread = threading.Thread(target=demo_data_provider)
+        demo_thread.daemon = True
+        demo_thread.start()
+        
+        # Run the dashboard with our local demo queues
+        main(local_emotion_queue, None, local_frame_queue)
