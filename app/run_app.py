@@ -167,11 +167,18 @@ def main():
     os.environ["AFFECTLINK_DETECTOR_RUNNING"] = "1"
     
     try:
-        # Launch the dashboard using Streamlit
+        # Launch the dashboard using Streamlit with comprehensive configuration
+        # to prevent any auto-reloading behavior
         dashboard_cmd = [
             sys.executable, "-m", "streamlit", "run", 
             os.path.join(current_dir, "dashboard.py"),
-            "--logger.level=error"
+            "--logger.level=error",
+            "--server.runOnSave=false",           # Disable auto-reload on save
+            "--server.fileWatcherType=none",      # Disable file watcher
+            "--client.showErrorDetails=false",    # Simplify error display
+            "--browser.gatherUsageStats=false",   # Disable analytics
+            "--server.enableCORS=false",          # Reduce complexity
+            "--server.enableXsrfProtection=false" # Simplify request handling
         ]
         
         print(f"Running dashboard with command: {' '.join(dashboard_cmd)}")

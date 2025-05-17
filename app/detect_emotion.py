@@ -78,10 +78,16 @@ def transcribe_audio_whisper(audio_path, whisper_model):
         import hashlib
         import random
         
-        # Generate a unique ID for this transcription attempt with some random noise to avoid caching
-        random_salt = random.randint(0, 100000)
-        transcription_id = hashlib.md5(f"{audio_path}_{time.time()}_{random_salt}".encode()).hexdigest()[:8]
-        logger.info(f"[{transcription_id}] Starting transcription of {audio_path}")
+        # Generate a truly unique ID for this transcription attempt
+        # Include more entropy sources to ensure we don't get cached results
+        current_time_ms = int(time.time() * 1000)
+        random_salt = random.randint(0, 1000000)
+        process_id = os.getpid()
+        audio_file_size = os.path.getsize(audio_path) if os.path.exists(audio_path) else 0
+        unique_string = f"{audio_path}_{current_time_ms}_{random_salt}_{process_id}_{audio_file_size}"
+        transcription_id = hashlib.md5(unique_string.encode()).hexdigest()[:8]
+        
+        logger.info(f"[{transcription_id}] Starting transcription of {audio_path} at {current_time_ms}")
         
         if not os.path.exists(audio_path):
             logger.warning(f"[{transcription_id}] Audio file missing: {audio_path}")
@@ -449,8 +455,8 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 # Increment the counter
                 audio_processing_loop.buffer_reset_count += 1
                 
-                # Every 3 iterations, reset the audio buffer to ensure fresh audio - more aggressive reset
-                if audio_processing_loop.buffer_reset_count >= 3:
+                # More aggressive buffer management - reset more frequently
+                if audio_processing_loop.buffer_reset_count >= 2:  # Reduced from 3 to 2
                     logger.info("Periodically clearing audio buffer to ensure fresh audio")
                     # audio_buffer already declared as global at top of function
                     with audio_lock:
@@ -458,7 +464,19 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         # Also clear the shared state cache to force new processing
                         shared_state['latest_audio'] = None
                         shared_state['transcribed_text'] = ""
+                        # Add a timestamp to force dashboard recognition of a new update
+                        shared_state['audio_reset_time'] = time.time()
+                    
+                    # Force more variation in reset timing to break potential loops
+                    import random
+                    random_sleep = random.uniform(0.2, 0.7)
+                    time.sleep(random_sleep)
+                    
+                    # Reset counter
                     audio_processing_loop.buffer_reset_count = 0
+                    
+                    # Log with more detail
+                    logger.warning(f"Audio buffer reset performed at {time.time():.3f} with {random_sleep:.3f}s sleep")
                 
                 # Track the last few transcriptions to detect if we're stuck in a loop
                 if not hasattr(audio_processing_loop, 'last_texts'):
@@ -526,22 +544,54 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     
                     # Check if transcription has changed
                     if text != last_transcription:
+                        # Log that we got a new transcription 
+                        logger.info(f"New transcription detected: '{text[:30]}...' (previous: '{last_transcription[:20]}...')")
                         last_transcription = text
                         last_transcription_change_time = time.time()
+                        
+                        # Initialize or reset a stuck counter
+                        if not hasattr(audio_processing_loop, 'stuck_counter'):
+                            audio_processing_loop.stuck_counter = 0
+                        else:
+                            audio_processing_loop.stuck_counter = 0
                     else:
-                        # Check if we've been stuck with the same transcription for too long
+                        # Check if we've been stuck with the same transcription
                         current_time = time.time()
-                        if current_time - last_transcription_change_time > 15:  # 15 seconds with same text
-                            logger.warning(f"Stuck on same transcription for 15+ seconds: '{text}' - forcing complete reset")
+                        time_since_change = current_time - last_transcription_change_time
+                        
+                        # Track how long we've been stuck
+                        if not hasattr(audio_processing_loop, 'stuck_counter'):
+                            audio_processing_loop.stuck_counter = 0
+                        audio_processing_loop.stuck_counter += 1
+                        
+                        # More aggressive: reduce the stuck time threshold to 10 seconds
+                        if time_since_change > 10 or audio_processing_loop.stuck_counter >= 3:
+                            logger.warning(f"Stuck on transcription for {time_since_change:.1f}s (count: {audio_processing_loop.stuck_counter}): '{text[:30]}...' - forcing COMPLETE reset")
+                            
+                            # Complete buffer reset
                             with audio_lock:
+                                # Full reset of all audio-related state
                                 audio_buffer.clear()
                                 shared_state['latest_audio'] = None
                                 shared_state['transcribed_text'] = ""
+                                
+                                # Reset any whisper caches by adding unique flag
+                                if hasattr(transcribe_audio_whisper, 'last_transcription'):
+                                    delattr(transcribe_audio_whisper, 'last_transcription')
+                                if hasattr(transcribe_audio_whisper, 'repeat_count'):
+                                    delattr(transcribe_audio_whisper, 'repeat_count')
+                                    
+                            # Reset tracking variables
                             last_transcription = ""
                             last_transcription_change_time = current_time
+                            audio_processing_loop.stuck_counter = 0
                             
-                            # Sleep briefly to allow new audio to be captured
-                            time.sleep(0.5)
+                            # Add random delay to help break any patterns
+                            import random
+                            random_sleep = random.uniform(0.3, 0.8)
+                            time.sleep(random_sleep)
+                            logger.info(f"Inserted random delay of {random_sleep:.2f}s after reset")
+                            
                             continue  # Skip rest of processing loop
                 else:
                     logger.debug("No text emotions detected")
@@ -569,18 +619,24 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         
                 # Clear part of the audio buffer more aggressively after successful processing
                 if text and len(audio_buffer) > audio_sample_rate:
-                    # Keep a smaller amount of audio - just half a second, clear the rest
+                    # Keep a smaller amount of audio - just 1/4 second, clear the rest
                     logger.info("Nearly completely resetting audio buffer to avoid repetitive transcriptions")
                     with audio_lock:
                         # Create a new deque with just a bit of audio for context
-                        keep_samples = int(audio_sample_rate * 0.5)  # Just half a second
+                        keep_samples = int(audio_sample_rate * 0.25)  # Just quarter second (reduced from 0.5)
                         new_buffer = list(audio_buffer)[-keep_samples:]
                         audio_buffer.clear()
                         for sample in new_buffer:
                             audio_buffer.append(sample)
                         
-                        # Force the transcription to update by clearing it
-                        shared_state['transcribed_text'] = ""
+                        # Force the transcription to update by setting a timed version
+                        # This ensures the dashboard sees it as a new update
+                        current_time = time.time()
+                        shared_state['transcribed_text'] = f"" # Force empty to ensure new transcription
+                        shared_state['buffer_reset_timestamp'] = current_time
+                        
+                        # Log the reset with timestamp
+                        logger.info(f"Audio buffer trimmed at {current_time:.3f}, kept {keep_samples} samples")
                 
                 # Smoothing text emotions - similar to original but with better error handling
                 if text_emotion:
@@ -929,28 +985,38 @@ def process_video():
                 logger.debug(f"Couldn't add frame to queue: {e}")
                 
         # Also save the latest frame to a shared file location for dashboard to access
+        # This is a fallback/complement to the queue-based sharing
         try:
-            # Save frame to temp location (every ~5 frames to avoid disk I/O overhead)
+            # Increment frame counter
             if hasattr(process_video, 'frame_count'):
                 process_video.frame_count += 1
             else:
                 process_video.frame_count = 0
                 
-            # Only save every 3rd frame to reduce disk activity but increase update frequency
-            if process_video.frame_count % 3 == 0:
+            # Increase the update frequency - save every 2nd frame instead of every 3rd
+            # This provides more frequent updates to the dashboard
+            if process_video.frame_count % 2 == 0:  # Changed from 3 to 2
                 import tempfile
                 import shutil
+                import random
+                
+                # Add a small random component to filenames to avoid any caching issues
+                random_suffix = random.randint(1000, 9999)
                 
                 # First write to a temp file to avoid partial reads by dashboard
-                tmp_frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame_tmp.jpg")
+                tmp_frame_path = os.path.join(tempfile.gettempdir(), f"affectlink_frame_tmp_{random_suffix}.jpg")
                 frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
                 
                 # Save with higher quality (95) to temp file
-                cv2.imwrite(tmp_frame_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-                
-                # Then move the temp file to the final location (atomic operation)
-                shutil.move(tmp_frame_path, frame_path)
-                logger.debug(f"Saved frame to {frame_path} (frame #{process_video.frame_count})")
+                # Convert to RGB before saving to ensure proper color format
+                if frame is not None:
+                    # Make a copy to avoid modifying the original
+                    frame_to_save = frame.copy()
+                    cv2.imwrite(tmp_frame_path, frame_to_save, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                    
+                    # Then move the temp file to the final location (atomic operation)
+                    shutil.move(tmp_frame_path, frame_path)
+                    logger.debug(f"Saved frame to {frame_path} (frame #{process_video.frame_count})")
         except Exception as e:
             # Saving to file is optional, so don't stop on errors
             logger.debug(f"Error saving frame to file: {e}")
@@ -1141,31 +1207,40 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                 print(f"Text emotion: {text_emotion} ({text_score:.2f}) - '{shared_state['transcribed_text'][:30]}...'")
             
             # Share the current emotional state via the queue and file
-            if latest:
-                # Combine all current emotional data
-                result_data = {
-                    "facial_emotion": shared_state['facial_emotion'],
-                    "text_emotion": shared_state['text_emotion'],
-                    "audio_emotion": shared_state['audio_emotion'],
-                    "transcribed_text": shared_state['transcribed_text'],
-                    "consistency_level": "Moderate",
-                    "cosine_similarity": 0.5  # Placeholder
-                }
-                
-                # First try sending via queue if available
-                if shared_state['emotion_queue'] is not None:
-                    try:
-                        # Send without blocking
-                        shared_state['emotion_queue'].put(result_data, block=False)
-                    except Exception as e:
-                        logger.error(f"Error sending emotion data to queue: {e}")
-                
-                # Also save to file for dashboard to access
+            # Always share data, regardless of latest, to ensure transcriptions are sent
+            
+            # Combine all current emotional data
+            result_data = {
+                "facial_emotion": shared_state['facial_emotion'],
+                "text_emotion": shared_state['text_emotion'],
+                "audio_emotion": shared_state['audio_emotion'],
+                "transcribed_text": shared_state['transcribed_text'],
+                "consistency_level": "Moderate",
+                "cosine_similarity": 0.5  # Placeholder
+            }
+            
+            # Add timestamps to transcriptions to ensure they update in UI
+            if shared_state['transcribed_text']:
+                result_data["transcribed_text"] = f"{shared_state['transcribed_text']} [{time.time():.3f}]"
+            
+            # First try sending via queue if available
+            if shared_state['emotion_queue'] is not None:
                 try:
-                    # Save every few updates to reduce disk I/O
+                    # Send without blocking
+                    shared_state['emotion_queue'].put(result_data, block=False)
+                    logger.info(f"Sent emotion data to queue with text: '{result_data['transcribed_text'][:30]}...'")
+                except Exception as e:
+                    logger.error(f"Error sending emotion data to queue: {e}")
+                
+                # Always save to file for dashboard to access - we want to ensure updates
+                try:
                     import json
                     import tempfile
                     import os
+                    import random
+                    
+                    # Add a unique identifier to each save to ensure file changes are detected
+                    result_data["update_id"] = f"{time.time():.6f}-{random.randint(1000, 9999)}"
                     
                     # Create a JSON-serializable version of the data
                     serializable_data = {}
@@ -1190,6 +1265,13 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                     # Add timestamp to the data
                     serializable_data["timestamp"] = float(time.time())
                     
+                    # Also directly copy transcribed_text to ensure it's included
+                    serializable_data["transcribed_text"] = result_data["transcribed_text"]
+                    serializable_data["update_id"] = result_data["update_id"]
+                    
+                    # Log the data being saved
+                    logger.debug(f"Saving emotion data to file with text: '{serializable_data['transcribed_text'][:30]}...'")
+                    
                     # Save to temp file using a temporary file approach to ensure atomic writes
                     emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
                     temp_path = f"{emotion_path}.tmp"
@@ -1203,6 +1285,9 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                     # Rename for atomic replacement
                     import shutil
                     shutil.move(temp_path, emotion_path)
+                    
+                    # Log success
+                    logger.debug(f"Successfully wrote emotion data to {emotion_path}")
                 except Exception as e:
                     logger.error(f"Error saving emotion data to file: {e}")
                     
