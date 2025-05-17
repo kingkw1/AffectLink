@@ -72,10 +72,39 @@ def transcribe_audio_whisper(audio_path, whisper_model):
     Transcribe audio file using Whisper.
     """
     try:
+        # First check if we actually have valid audio data
+        import soundfile as sf
+        import os
+        
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
+            logger.warning(f"Audio file missing or too small: {audio_path}, size: {os.path.getsize(audio_path) if os.path.exists(audio_path) else 'N/A'}")
+            return None
+            
+        # Check audio content
+        audio_data, sample_rate = sf.read(audio_path)
+        audio_duration = len(audio_data) / sample_rate
+        audio_rms = np.sqrt(np.mean(audio_data**2))
+        
+        logger.info(f"Audio stats: duration={audio_duration:.2f}s, RMS={audio_rms:.6f}, samples={len(audio_data)}")
+        
+        # If audio is essentially silence, don't bother transcribing
+        if audio_rms < 0.001:  # Very quiet audio
+            logger.warning("Audio appears to be silence, skipping transcription")
+            return None
+            
+        # Proceed with transcription for valid audio
         result = whisper_model.transcribe(audio_path)
-        return result['text']
+        
+        # Log the audio details when we get successful results
+        transcribed_text = result['text'].strip()
+        if transcribed_text:
+            logger.info(f"Transcribed {audio_duration:.2f}s audio with RMS {audio_rms:.6f}")
+        
+        return transcribed_text
     except Exception as e:
-        print(f"Transcription error: {e}")
+        logger.error(f"Transcription error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 def classify_emotion(text, classifier):
@@ -112,9 +141,14 @@ def analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mappin
         waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
         # Pass numpy array directly to feature extractor
         inputs = ser_processor(waveform, sampling_rate=16000, return_tensors="pt")
-        # Move to device
+
+        # Move inputs to the same device as the model
+        model_device = next(ser_model.parameters()).device
+        logger.debug(f"Model is on device: {model_device}")
+        
+        # Move inputs to the same device
         for k in inputs:
-            inputs[k] = inputs[k].to(device)
+            inputs[k] = inputs[k].to(model_device)
             
         # Get logits
         with torch.no_grad():
@@ -125,12 +159,13 @@ def analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mappin
         
         # Get the most likely emotion
         top_idx = scores.argmax()
-        emotion = ser_label_mapping[top_idx]
-        confidence = scores[top_idx]
+        emotion = ser_label_mapping[top_idx] if top_idx < len(ser_label_mapping) else "unknown"
+        confidence = float(scores[top_idx])
         
         return emotion, confidence
     except Exception as e:
         print(f"Audio emotion analysis error: {e}")
+        logger.error(f"Audio emotion analysis error: {e}")
         return None, None
 
 def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, ser_label_mapping, device):
@@ -142,9 +177,14 @@ def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, ser_label_m
         waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
         # Process audio
         inputs = ser_processor(waveform, sampling_rate=16000, return_tensors="pt")
-        # Move to device
+        
+        # Move inputs to the same device as the model
+        model_device = next(ser_model.parameters()).device
+        logger.debug(f"Model is on device: {model_device}")
+        
+        # Move inputs to the same device
         for k in inputs:
-            inputs[k] = inputs[k].to(device)
+            inputs[k] = inputs[k].to(model_device)
             
         # Get logits
         with torch.no_grad():
@@ -154,20 +194,28 @@ def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, ser_label_m
         scores = torch.nn.functional.softmax(logits, dim=1).squeeze().cpu().numpy()
         
         # Create emotion-score pairs
-        result = []
+        all_results = []
         for i, score in enumerate(scores):
             emotion = ser_label_mapping[i] if i < len(ser_label_mapping) else f"unknown-{i}"
-            result.append({
+            all_results.append({
                 "emotion": emotion,
                 "score": float(score)
             })
         
         # Sort by score
-        result_sorted = sorted(result, key=lambda x: x["score"], reverse=True)
-        return result_sorted
+        result_sorted = sorted(all_results, key=lambda x: x["score"], reverse=True)
+        
+        # Return top emotion, score and full results
+        if result_sorted:
+            top_emotion = result_sorted[0]["emotion"]
+            top_score = result_sorted[0]["score"]
+            return top_emotion, top_score, result_sorted
+        else:
+            return "neutral", 0.0, []
+            
     except Exception as e:
-        print(f"Audio emotion full analysis error: {e}")
-        return []
+        logger.error(f"Audio emotion full analysis error: {e}")
+        return "neutral", 0.0, []
 
 def record_audio_chunk(duration=5, fs=16000):
     """
@@ -253,97 +301,188 @@ def create_unified_emotion_vector(emotion_scores, mapping_dict):
 
 def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device, video_started_event):
     """Process audio for speech-to-text and emotion analysis"""
-    # Wait for video processing to start
-    video_started_event.wait()
+    # Add debug logging to track thread execution
+    logger.info("Audio processing thread started")
     
-    chunk_duration = 5
-    smoothing_window = 3
-    emotion_window = deque(maxlen=smoothing_window)
-    score_window = deque(maxlen=smoothing_window)
-    audio_emotion_window = deque(maxlen=smoothing_window)
-    audio_score_window = deque(maxlen=smoothing_window)
-    
-    while not (isinstance(stop_flag, dict) and stop_flag.get('stop', False)) and not (hasattr(stop_flag, 'is_set') and stop_flag.is_set()):
-        # Record audio chunk
-        temp_wav = record_audio_chunk(duration=chunk_duration)
+    try:
+        # Wait for video processing to start
+        logger.info("Waiting for video processing to start...")
+        video_started_event.wait()
+        logger.info("Video processing started, beginning audio processing")
         
-        # Transcribe audio to text
-        text = transcribe_audio_whisper(temp_wav, whisper_model)
-
-        # Get all text emotion scores
-        text_emotion_scores_raw = classifier(text, top_k=None) if text else [] 
-
-        text_emotion_scores = []
-        if text and text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
-            # The classifier for "j-hartmann/emotion-english-distilroberta-base" returns a list containing a list of dicts
-            if isinstance(text_emotion_scores_raw[0], list):
-                 text_emotion_scores = sorted(text_emotion_scores_raw[0], key=lambda x: x['score'], reverse=True)
-            elif isinstance(text_emotion_scores_raw[0], dict): # Fallback if the structure is flatter
-                 text_emotion_scores = sorted(text_emotion_scores_raw, key=lambda x: x['score'], reverse=True)
-
-        # Get top text emotion
-        if text_emotion_scores:
-            top_text = text_emotion_scores[0]
-            emotion = top_text['label']
-            score = top_text['score']
-        else:
-            emotion, score = None, None
-            
-        text_timestamp = time.time()
+        chunk_duration = 5
+        smoothing_window = 3
+        emotion_window = deque(maxlen=smoothing_window)
+        score_window = deque(maxlen=smoothing_window)
+        audio_emotion_window = deque(maxlen=smoothing_window)
+        audio_score_window = deque(maxlen=smoothing_window)
         
-        # Get audio emotion scores
-        audio_emotion, audio_score, audio_emotion_scores = analyze_audio_emotion_full(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
-        audio_timestamp = time.time()
-        
-        # Clean up temp file
-        if isinstance(temp_wav, str) and os.path.exists(temp_wav):
-            os.unlink(temp_wav)
-            
-        # Smoothing text emotions
-        if emotion:
-            emotion_window.append(emotion)
-            score_window.append(score)
-            smoothed_emotion = max(set(emotion_window), key=emotion_window.count)
-            smoothed_score = moving_average([s for e, s in zip(emotion_window, score_window) if e == smoothed_emotion])
-            log_entry_text = {
-                'timestamp': text_timestamp,
-                'modality': 'text',
-                'emotion': smoothed_emotion,
-                'confidence': smoothed_score,
-                'emotion_scores': text_emotion_scores
-            }
-            with audio_lock:
-                audio_emotion_log.append(log_entry_text)
+        while not (isinstance(stop_flag, dict) and stop_flag.get('stop', False)) and not (hasattr(stop_flag, 'is_set') and stop_flag.is_set()):
+            try:
+                # Use the audio buffer collected in record_audio
+                if shared_state['latest_audio'] is None or len(shared_state['latest_audio']) < 1000:
+                    logger.info("No audio data available yet, waiting...")
+                    time.sleep(1)
+                    continue
                 
-        # Smoothing audio emotions
-        if audio_emotion:
-            audio_emotion_window.append(audio_emotion)
-            audio_score_window.append(audio_score)
-            smoothed_audio_emotion = max(set(audio_emotion_window), key=audio_emotion_window.count)
-            smoothed_audio_score = moving_average([s for e, s in zip(audio_emotion_window, audio_score_window) if e == smoothed_audio_emotion])
-            with audio_lock:
-                audio_emotion_log.append({
-                    'timestamp': audio_timestamp,
-                    'modality': 'audio',
-                    'emotion': smoothed_audio_emotion,
-                    'confidence': smoothed_audio_score,
-                    'emotion_scores': audio_emotion_scores
-                })
+                # Save the latest audio to a temporary file for processing
+                temp_wav = os.path.join(tempfile.gettempdir(), f"affectlink_temp_audio_{int(time.time())}.wav")
+                audio_data = shared_state['latest_audio']
+                logger.debug(f"Saving audio chunk with {len(audio_data)} samples for processing")
+                sf.write(temp_wav, audio_data, 16000)
+                
+                # Transcribe audio to text
+                logger.debug("Transcribing audio...")
+                text = transcribe_audio_whisper(temp_wav, whisper_model)
+                if text:
+                    logger.info(f"Transcribed text: {text[:50]}...")
+                else:
+                    logger.debug("No transcription generated")
 
-# Try to get the video processing function from our module
-external_video_processing_loop = get_video_processing_function()
+                # Get all text emotion scores
+                text_emotion_scores_raw = classifier(text, top_k=None) if text else [] 
+
+                text_emotion_scores = []
+                if text and text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
+                    # The classifier for "j-hartmann/emotion-english-distilroberta-base" returns a list containing a list of dicts
+                    if isinstance(text_emotion_scores_raw[0], list):
+                        text_emotion_scores = sorted(text_emotion_scores_raw[0], key=lambda x: x['score'], reverse=True)
+                    elif isinstance(text_emotion_scores_raw[0], dict): # Fallback if the structure is flatter
+                        text_emotion_scores = sorted(text_emotion_scores_raw, key=lambda x: x['score'], reverse=True)
+
+                # Get top text emotion
+                text_emotion = None
+                text_score = 0.0
+                if text_emotion_scores:
+                    top_text = text_emotion_scores[0]
+                    text_emotion = top_text['label']
+                    text_score = top_text['score']
+                    logger.info(f"Text emotion: {text_emotion} ({text_score:.2f})")
+                    # Update shared state with transcript and text emotion
+                    shared_state['transcribed_text'] = text
+                    shared_state['text_emotion'] = (text_emotion, text_score)
+                else:
+                    logger.debug("No text emotions detected")
+                
+                # Get audio emotion scores - using improved function
+                logger.debug("Analyzing audio emotion...")
+                try:
+                    # Use direct analyze_audio_emotion for simplicity
+                    audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
+                    if audio_emotion and audio_score:
+                        logger.info(f"Audio emotion: {audio_emotion} ({audio_score:.2f})")
+                        # Update the shared state directly for dashboard access
+                        shared_state['audio_emotion'] = (audio_emotion, audio_score)
+                    else:
+                        logger.debug("Audio emotion analysis returned no valid results")
+                except Exception as audio_err:
+                    logger.error(f"Error analyzing audio emotion: {audio_err}")
+                
+                # Clean up temp file
+                if isinstance(temp_wav, str) and os.path.exists(temp_wav):
+                    try:
+                        os.unlink(temp_wav)
+                    except:
+                        pass  # Ignore cleanup errors
+                
+                # Smoothing text emotions - similar to original but with better error handling
+                if text_emotion:
+                    emotion_window.append(text_emotion)
+                    score_window.append(text_score)
+                    try:
+                        smoothed_emotion = max(set(emotion_window), key=emotion_window.count)
+                        smoothed_score = moving_average([s for e, s in zip(emotion_window, score_window) if e == smoothed_emotion])
+                        
+                        log_entry_text = {
+                            'timestamp': time.time(),
+                            'modality': 'text',
+                            'emotion': smoothed_emotion,
+                            'confidence': smoothed_score,
+                            'emotion_scores': text_emotion_scores
+                        }
+                        with audio_lock:
+                            audio_emotion_log.append(log_entry_text)
+                    except Exception as e:
+                        logger.error(f"Error in text emotion smoothing: {e}")
+                    
+                # Smoothing audio emotions
+                if audio_emotion:
+                    audio_emotion_window.append(audio_emotion)
+                    audio_score_window.append(audio_score)
+                    try:
+                        smoothed_audio_emotion = max(set(audio_emotion_window), key=audio_emotion_window.count)
+                        smoothed_audio_score = moving_average([s for e, s in zip(audio_emotion_window, audio_score_window) if e == smoothed_audio_emotion])
+                        
+                        with audio_lock:
+                            audio_emotion_log.append({
+                                'timestamp': time.time(),
+                                'modality': 'audio',
+                                'emotion': smoothed_audio_emotion,
+                                'confidence': smoothed_audio_score,
+                                'emotion_scores': None  # We're not returning full scores here
+                            })
+                    except Exception as e:
+                        logger.error(f"Error in audio emotion smoothing: {e}")
+                
+                # Sleep to avoid high CPU usage
+                time.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"Error in audio processing loop: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                time.sleep(1)  # Avoid tight loop on errors
+            
+    except Exception as e:
+        logger.error(f"Fatal error in audio processing thread: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        logger.info("Audio processing thread stopped")
 
 def record_audio():
     """Record audio continuously and store in shared state"""
-    global shared_state
+    global shared_state, audio_buffer
+    
+    # Print available devices for debugging
+    try:
+        logger.info("Available audio devices:")
+        devices = sd.query_devices()
+        default_input = sd.query_devices(kind='input')
+        logger.info(f"Default input device: {default_input.get('name', 'Unknown')}")
+        for i, device in enumerate(devices):
+            if device.get('max_input_channels', 0) > 0:  # Only input devices
+                logger.info(f"  {i}: {device.get('name', 'Unknown')} (Channels: {device.get('max_input_channels')})")
+    except Exception as e:
+        logger.error(f"Error querying audio devices: {e}")
+    
+    # Track audio stats
+    audio_level_tracker = deque(maxlen=20)  # Track last 20 audio chunks
+    last_stats_time = time.time()
     
     def audio_callback(indata, frames, time, status):
         """Callback for sounddevice to continuously capture audio"""
+        nonlocal audio_level_tracker, last_stats_time
+        
         if status:
-            print(f"Audio recording status: {status}")
+            logger.info(f"Audio recording status: {status}")
         
         # Add the new audio data to our buffer
         audio_data = indata[:, 0]  # Use first channel
+        
+        # Track audio levels for diagnostics
+        audio_rms = np.sqrt(np.mean(audio_data**2))
+        audio_level_tracker.append(audio_rms)
+        
+        # Periodic diagnostics about audio levels
+        current_time = time.time()
+        if current_time - last_stats_time > 5:  # Every 5 seconds
+            avg_level = sum(audio_level_tracker) / len(audio_level_tracker) if audio_level_tracker else 0
+            logger.info(f"Audio levels: current={audio_rms:.6f}, avg={avg_level:.6f}")
+            if avg_level < 0.001:
+                logger.warning("Audio levels are very low. Is your microphone working and unmuted?")
+            last_stats_time = current_time
+        
         for sample in audio_data:
             audio_buffer.append(sample)
         
@@ -361,7 +500,7 @@ def record_audio():
         
         # Start recording
         with stream:
-            logger.info("Audio recording started")
+            logger.info(f"Audio recording started with sample rate {audio_sample_rate}Hz")
             
             # Keep recording until stop flag is set
             while True:
@@ -379,14 +518,19 @@ def record_audio():
                 
     except Exception as e:
         logger.error(f"Error in audio recording: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     finally:
         logger.info("Audio recording stopped")
 
 def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event):
     """Wrapper around the video processing loop"""
-    if external_video_processing_loop:
+    # Get the external video processing function
+    external_function = get_video_processing_function()
+    
+    if external_function:
         # Use our external implementation
-        return external_video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event)
+        return external_function(video_emotions, video_lock, stop_flag, video_started_event)
     else:
         # Fall back to the original implementation 
         from detect_emotion import video_processing_loop as original_video_processing_loop
@@ -623,23 +767,59 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                             model="j-hartmann/emotion-english-distilroberta-base", 
                             top_k=None)
     
-    # Initialize audio emotion classifier
+    # Initialize audio emotion classifier - using a more accessible model
     print("Initializing audio emotion classifier...")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device set to use {device}")
+    
+    # Use simpler model instead
     model_name = "MIT/ast-finetuned-speech-commands-v2"
     audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
     audio_classifier = AutoModelForAudioClassification.from_pretrained(model_name)
     
-    # Start audio recording thread
+    # Event for synchronization between video and audio threads
+    video_started_event = threading.Event()
+
+    # --- START AUDIO PROCESSING COMPONENTS ---
+    
+    # Start audio recording thread first (collects audio data)
     print("Starting audio recording thread...")
     audio_thread = threading.Thread(target=record_audio)
     audio_thread.daemon = True
     audio_thread.start()
     
+    # Create audio analysis data structures
+    audio_emotion_log = []
+    audio_lock = threading.Lock()
+    
+    # Start audio processing thread with error handling
+    print("Starting audio processing thread...")
+    try:
+        audio_processing_thread = threading.Thread(
+            target=audio_processing_loop,
+            args=(audio_emotion_log, audio_lock, shared_state['stop_event'], 
+                  model, text_classifier, 
+                  audio_classifier, audio_feature_extractor, 
+                  list(SER_TO_UNIFIED.keys()), device, video_started_event)
+        )
+        audio_processing_thread.daemon = True
+        audio_processing_thread.start()
+        print("Audio processing thread started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start audio processing thread: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    
+    # --- END AUDIO PROCESSING COMPONENTS ---
+
     # Start video processing thread
     print("Starting video processing thread...")
     video_thread = threading.Thread(target=process_video)
     video_thread.daemon = True
     video_thread.start()
+    
+    # Set the event to signal video has started
+    video_started_event.set()
     
     # Main loop for emotion analysis
     print("Starting main emotion analysis loop...")
@@ -665,18 +845,18 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                 latest['facial_confidence'] = confidence
                 
                 print(f"Facial emotion: {facial_emotion} ({confidence:.2f})")
-                  # Use the latest audio data every few seconds
-            global last_audio_analysis
-            if (time.time() - last_audio_analysis) > 3:
-                # Process audio data for emotion detection here
-                # Code to analyze audio would go here
+            
+            # Print audio emotion if available for debugging
+            audio_emotion, audio_score = shared_state['audio_emotion']
+            if audio_emotion and audio_emotion != "neutral":
+                print(f"Audio emotion: {audio_emotion} ({audio_score:.2f})")
                 
-                # Add timestamp to check for processing frequency
-                last_audio_analysis = time.time()
-                    
-                # Log the update
-                logger.debug(f"Audio analysis performed at {time.time()}")
-                  # Share the current emotional state via the queue and file
+            # Print text emotion if available for debugging
+            text_emotion, text_score = shared_state['text_emotion']
+            if shared_state['transcribed_text'] and text_emotion != "neutral":
+                print(f"Text emotion: {text_emotion} ({text_score:.2f}) - '{shared_state['transcribed_text'][:30]}...'")
+            
+            # Share the current emotional state via the queue and file
             if latest:
                 # Combine all current emotional data
                 result_data = {
@@ -695,13 +875,15 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                         shared_state['emotion_queue'].put(result_data, block=False)
                     except Exception as e:
                         logger.error(f"Error sending emotion data to queue: {e}")
-                  # Also save to file for dashboard to access
+                
+                # Also save to file for dashboard to access
                 try:
                     # Save every few updates to reduce disk I/O
                     import json
                     import tempfile
                     import os
-                          # Create a JSON-serializable version of the data
+                    
+                    # Create a JSON-serializable version of the data
                     serializable_data = {}
                     
                     # Convert any NumPy values to standard Python types
@@ -750,7 +932,4 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
             shared_state['stop_event']['stop'] = True
         print("Waiting for threads to finish...")
         # Wait for threads to finish gracefully
-        time.sleep(2) 
-
-if __name__ == "__main__":
-    main()
+        time.sleep(2)
