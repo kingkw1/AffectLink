@@ -122,17 +122,35 @@ def update_dashboard():
             # Check for frame saved to temporary file by detector
             import tempfile
             import os
+            import time
             
             frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
             if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
                 try:
                     # Track file modification time to avoid reloading the same frame repeatedly
                     mod_time = os.path.getmtime(frame_path)
+                    current_time = time.time()
                     
-                    # Only load if file has been modified since last check
-                    if not hasattr(update_dashboard, 'last_frame_time') or mod_time > update_dashboard.last_frame_time:
-                        frame = cv2.imread(frame_path)
-                        update_dashboard.last_frame_time = mod_time
+                    # Only load if file has been modified since last check or if it's been a while
+                    if (not hasattr(update_dashboard, 'last_frame_time') or 
+                        mod_time > update_dashboard.last_frame_time or
+                        (hasattr(update_dashboard, 'last_frame_check') and 
+                         current_time - update_dashboard.last_frame_check > 2)):
+                         
+                        # Try to read the file, with retry logic for potential file access issues
+                        for attempt in range(3):  # Try up to 3 times
+                            try:
+                                frame = cv2.imread(frame_path)
+                                if frame is not None and frame.size > 0:
+                                    update_dashboard.last_frame_time = mod_time
+                                    break
+                                else:
+                                    time.sleep(0.05)  # Brief pause before retry
+                            except Exception as retry_err:
+                                print(f"Retry {attempt+1} reading frame: {retry_err}")
+                                time.sleep(0.05)
+                        
+                    update_dashboard.last_frame_check = current_time
                 except Exception as e:
                     print(f"Error reading frame file: {e}")
             

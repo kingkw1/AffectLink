@@ -177,14 +177,12 @@ def transcribe_audio_whisper(audio_path, whisper_model):
                 return "RESET_BUFFER"
         else:
             # Reset repeat counter when we get different text
-            transcribe_audio_whisper.repeat_count = 0
-                
-        # Store for comparison next time
-        transcribe_audio_whisper.last_transcription = transcribed_text
-        
-        # Log detailed results
-        if transcribed_text:
-            logger.info(f"[{transcription_id}] Transcribed in {transcription_time:.2f}s: '{transcribed_text}' (length: {len(transcribed_text)})")
+            transcribe_audio_whisper.repeat_count = 0                # Store for comparison next time
+            transcribe_audio_whisper.last_transcription = transcribed_text
+            
+            # Log detailed results
+            if transcribed_text:
+                logger.info(f"[{transcription_id}] Transcribed in {transcription_time:.2f}s: '{transcribed_text}' (length: {len(transcribed_text)})")
             
             # Log segments if available for more detailed analysis
             if 'segments' in result and len(result['segments']) > 0:
@@ -193,8 +191,8 @@ def transcribe_audio_whisper(audio_path, whisper_model):
                     if 'text' in segment:
                         segments_info.append(f"[{i}] {segment.get('text', '')[:30]}...")
                 logger.info(f"[{transcription_id}] Segments: {' | '.join(segments_info)}")
-        else:
-            logger.warning(f"[{transcription_id}] Transcription returned empty result after {transcription_time:.2f}s despite valid audio")
+            else:
+                logger.warning(f"[{transcription_id}] Transcription returned empty result after {transcription_time:.2f}s despite valid audio")
         
         return transcribed_text
     except Exception as e:
@@ -401,6 +399,10 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
     global audio_buffer  # Declare global at top of function
     logger.info("Audio processing thread started")
     
+    # Add a timestamp to track how long we've had the same transcription
+    last_transcription_change_time = time.time()
+    last_transcription = ""
+    
     try:
         # Wait for video processing to start
         logger.info("Waiting for video processing to start...")
@@ -447,35 +449,55 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 # Increment the counter
                 audio_processing_loop.buffer_reset_count += 1
                 
-                # Every 10 iterations, reset the audio buffer to ensure fresh audio
-                if audio_processing_loop.buffer_reset_count >= 10:
+                # Every 3 iterations, reset the audio buffer to ensure fresh audio - more aggressive reset
+                if audio_processing_loop.buffer_reset_count >= 3:
                     logger.info("Periodically clearing audio buffer to ensure fresh audio")
                     # audio_buffer already declared as global at top of function
                     with audio_lock:
                         audio_buffer.clear()
+                        # Also clear the shared state cache to force new processing
+                        shared_state['latest_audio'] = None
+                        shared_state['transcribed_text'] = ""
                     audio_processing_loop.buffer_reset_count = 0
                 
                 # Track the last few transcriptions to detect if we're stuck in a loop
                 if not hasattr(audio_processing_loop, 'last_texts'):
                     audio_processing_loop.last_texts = []
+                    audio_processing_loop.no_new_text_counter = 0
                 
                 if text:
                     logger.info(f"Transcribed text: {text[:50]}...")
+                    
+                    # Add timestamp to the text to help identify if it's actually new
+                    text_with_timestamp = f"{text} [ts:{time.time():.2f}]"
                     
                     # Store this transcription for repeat detection
                     audio_processing_loop.last_texts.append(text)
                     if len(audio_processing_loop.last_texts) > 5:
                         audio_processing_loop.last_texts.pop(0)
                     
-                    # If we have the same text repeatedly, force a buffer reset
-                    if len(audio_processing_loop.last_texts) >= 3:
-                        if all(t == audio_processing_loop.last_texts[0] for t in audio_processing_loop.last_texts):
-                            logger.warning(f"Detected same transcription {len(audio_processing_loop.last_texts)} times in a row - force clearing buffer")
+                    # If we have the same text at all, be much more aggressive about resetting
+                    # We only need 2 repeat detections to trigger a reset now
+                    if len(audio_processing_loop.last_texts) >= 2:
+                        # Only compare the actual text without timestamps
+                        if audio_processing_loop.last_texts[-1] == audio_processing_loop.last_texts[-2]:
+                            logger.warning(f"Detected same transcription twice in a row - force clearing buffer: '{text}'")
                             # Clear the buffer (audio_buffer already declared as global at top of function)
                             with audio_lock:
                                 audio_buffer.clear()
-                            # Also clear the tracking history
+                                # Also clear shared state to force new processing
+                                shared_state['latest_audio'] = None
+                                # Update with timestamped text to force a change
+                                shared_state['transcribed_text'] = text_with_timestamp
+                            
+                            # Force random sleep to introduce variability 
+                            import random
+                            random_sleep = random.uniform(0.1, 0.5)
+                            time.sleep(random_sleep)
+                                
+                            # Also clear the tracking history and reset counter to trigger faster reset
                             audio_processing_loop.last_texts = []
+                            audio_processing_loop.buffer_reset_count = 0
                 else:
                     logger.warning("No transcription generated - will try again with fresh audio")
 
@@ -501,6 +523,26 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     # Update shared state with transcript and text emotion
                     shared_state['transcribed_text'] = text
                     shared_state['text_emotion'] = (text_emotion, text_score)
+                    
+                    # Check if transcription has changed
+                    if text != last_transcription:
+                        last_transcription = text
+                        last_transcription_change_time = time.time()
+                    else:
+                        # Check if we've been stuck with the same transcription for too long
+                        current_time = time.time()
+                        if current_time - last_transcription_change_time > 15:  # 15 seconds with same text
+                            logger.warning(f"Stuck on same transcription for 15+ seconds: '{text}' - forcing complete reset")
+                            with audio_lock:
+                                audio_buffer.clear()
+                                shared_state['latest_audio'] = None
+                                shared_state['transcribed_text'] = ""
+                            last_transcription = ""
+                            last_transcription_change_time = current_time
+                            
+                            # Sleep briefly to allow new audio to be captured
+                            time.sleep(0.5)
+                            continue  # Skip rest of processing loop
                 else:
                     logger.debug("No text emotions detected")
                 
@@ -525,18 +567,20 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     except:
                         pass  # Ignore cleanup errors
                         
-                # Clear part of the audio buffer after successful processing to avoid reprocessing
-                # the same audio constantly - but keep some audio for context
-                if text and len(audio_buffer) > audio_sample_rate * 2:
-                    # Keep the most recent 1 second of audio, clear the rest
-                    logger.info("Partially resetting audio buffer to avoid repetitive transcriptions")
+                # Clear part of the audio buffer more aggressively after successful processing
+                if text and len(audio_buffer) > audio_sample_rate:
+                    # Keep a smaller amount of audio - just half a second, clear the rest
+                    logger.info("Nearly completely resetting audio buffer to avoid repetitive transcriptions")
                     with audio_lock:
-                        # Create a new deque with just the last second of audio
-                        keep_samples = audio_sample_rate * 1
+                        # Create a new deque with just a bit of audio for context
+                        keep_samples = int(audio_sample_rate * 0.5)  # Just half a second
                         new_buffer = list(audio_buffer)[-keep_samples:]
                         audio_buffer.clear()
                         for sample in new_buffer:
                             audio_buffer.append(sample)
+                        
+                        # Force the transcription to update by clearing it
+                        shared_state['transcribed_text'] = ""
                 
                 # Smoothing text emotions - similar to original but with better error handling
                 if text_emotion:
@@ -646,27 +690,49 @@ def record_audio():
                 logger.warning("Audio levels are very low. Is your microphone working and unmuted?")
             last_stats_time = current_time
         
+        # Add a check here to prevent the buffer from growing too large
+        max_buffer_size = audio_sample_rate * 10  # Maximum 10 seconds of audio
+        if len(audio_buffer) > max_buffer_size:
+            # If buffer is too large, only keep the most recent data
+            logger.warning(f"Audio buffer exceeded max size ({len(audio_buffer)} > {max_buffer_size}), trimming")
+            new_buffer = list(audio_buffer)[-max_buffer_size:]
+            audio_buffer.clear()
+            for sample in new_buffer:
+                audio_buffer.append(sample)
+            
+        # Add new audio data to buffer
         for sample in audio_data:
             audio_buffer.append(sample)
         
-        # Store the latest audio for processing, and check if we have speech
-        audio_array = np.array(audio_buffer)
-        shared_state['latest_audio'] = audio_array
+        # Store the latest audio for processing
+        try:
+            audio_array = np.array(audio_buffer)
+            shared_state['latest_audio'] = audio_array
+        except Exception as e:
+            logger.error(f"Error updating latest audio: {e}")
         
         # Track silence periods
         if not hasattr(audio_callback, 'silence_tracker'):
             audio_callback.silence_tracker = 0
         
-        # Check if this is essentially silence
+        # Check if this is essentially silence - be more aggressive with buffer clearing
         if audio_rms < 0.001:
             audio_callback.silence_tracker += 1
-            # Reset buffer after 30 seconds of silence to avoid "I'm glad I found you" syndrome
-            if audio_callback.silence_tracker > 300:  # ~30 seconds if called every 100ms
+            # Reset buffer after 15 seconds of silence to avoid "I'm glad I found you" syndrome
+            # Much more aggressive than before (15 seconds instead of 30)
+            if audio_callback.silence_tracker > 150:  # ~15 seconds if called every 100ms
                 logger.warning("Detected extended silence - resetting audio buffer")
                 audio_buffer.clear()
+                shared_state['latest_audio'] = np.array([])  # Clear latest audio as well
                 audio_callback.silence_tracker = 0
         else:
             audio_callback.silence_tracker = 0  # Reset on non-silent audio
+            
+        # Add a timestamp to track when we last got audio data
+        if not hasattr(audio_callback, 'last_audio_time'):
+            audio_callback.last_audio_time = time.time()
+        else:
+            audio_callback.last_audio_time = time.time()
     
     try:
         # Set up the audio stream
@@ -870,11 +936,21 @@ def process_video():
             else:
                 process_video.frame_count = 0
                 
-            # Only save every 5th frame to reduce disk activity
-            if process_video.frame_count % 5 == 0:
+            # Only save every 3rd frame to reduce disk activity but increase update frequency
+            if process_video.frame_count % 3 == 0:
                 import tempfile
+                import shutil
+                
+                # First write to a temp file to avoid partial reads by dashboard
+                tmp_frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame_tmp.jpg")
                 frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
-                cv2.imwrite(frame_path, frame)
+                
+                # Save with higher quality (95) to temp file
+                cv2.imwrite(tmp_frame_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                
+                # Then move the temp file to the final location (atomic operation)
+                shutil.move(tmp_frame_path, frame_path)
+                logger.debug(f"Saved frame to {frame_path} (frame #{process_video.frame_count})")
         except Exception as e:
             # Saving to file is optional, so don't stop on errors
             logger.debug(f"Error saving frame to file: {e}")
