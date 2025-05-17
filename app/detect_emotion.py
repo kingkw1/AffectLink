@@ -75,30 +75,126 @@ def transcribe_audio_whisper(audio_path, whisper_model):
         # First check if we actually have valid audio data
         import soundfile as sf
         import os
+        import hashlib
+        import random
         
-        if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1000:
-            logger.warning(f"Audio file missing or too small: {audio_path}, size: {os.path.getsize(audio_path) if os.path.exists(audio_path) else 'N/A'}")
+        # Generate a unique ID for this transcription attempt with some random noise to avoid caching
+        random_salt = random.randint(0, 100000)
+        transcription_id = hashlib.md5(f"{audio_path}_{time.time()}_{random_salt}".encode()).hexdigest()[:8]
+        logger.info(f"[{transcription_id}] Starting transcription of {audio_path}")
+        
+        if not os.path.exists(audio_path):
+            logger.warning(f"[{transcription_id}] Audio file missing: {audio_path}")
+            return None
+            
+        file_size = os.path.getsize(audio_path)
+        if file_size < 2000:  # Increased minimum size threshold
+            logger.warning(f"[{transcription_id}] Audio file too small: {file_size} bytes")
             return None
             
         # Check audio content
         audio_data, sample_rate = sf.read(audio_path)
         audio_duration = len(audio_data) / sample_rate
         audio_rms = np.sqrt(np.mean(audio_data**2))
+        audio_peak = np.max(np.abs(audio_data))
+        audio_std = np.std(audio_data)
         
-        logger.info(f"Audio stats: duration={audio_duration:.2f}s, RMS={audio_rms:.6f}, samples={len(audio_data)}")
+        logger.info(f"Audio file stats: path={audio_path}, duration={audio_duration:.2f}s, RMS={audio_rms:.6f}, peak={audio_peak:.6f}, std={audio_std:.6f}, samples={len(audio_data)}")
+        
+        # Save detailed audio stats to help diagnose issues
+        segments = 5
+        segment_size = len(audio_data) // segments
+        if segment_size > 0:
+            segment_stats = []
+            for i in range(segments):
+                start_idx = i * segment_size
+                end_idx = start_idx + segment_size
+                segment = audio_data[start_idx:end_idx]
+                segment_rms = np.sqrt(np.mean(segment**2))
+                segment_stats.append(f"{segment_rms:.6f}")
+            logger.info(f"Audio segment RMS values: {', '.join(segment_stats)}")
         
         # If audio is essentially silence, don't bother transcribing
         if audio_rms < 0.001:  # Very quiet audio
-            logger.warning("Audio appears to be silence, skipping transcription")
+            logger.warning(f"[{transcription_id}] Audio appears to be silence (RMS={audio_rms:.6f}), skipping transcription")
             return None
             
+        # Log whisper model device
+        if hasattr(whisper_model, 'device'):
+            device_info = f"on device {whisper_model.device}"
+        else:
+            device_info = "(device unknown)"
+            
+        logger.info(f"[{transcription_id}] Running Whisper transcription {device_info} on {audio_duration:.2f}s audio")
+            
         # Proceed with transcription for valid audio
-        result = whisper_model.transcribe(audio_path)
+        start_time = time.time()
         
-        # Log the audio details when we get successful results
-        transcribed_text = result['text'].strip()
+        # Use more aggressive options for better transcription
+        try:
+            # Use more parameters to improve accuracy and ensure actual speech is detected
+            result = whisper_model.transcribe(
+                audio_path,
+                language="en",  # Force English language
+                temperature=0.2,  # Slightly higher temperature for better diversity
+                no_speech_threshold=0.3,  # Much less aggressive filtering to catch all speech
+                logprob_threshold=-2.0,  # Even less strict token filtering
+                condition_on_previous_text=False,  # Don't condition on previous text to avoid repetition
+                initial_prompt="This is a transcription of speech."  # Help the model understand context
+            )
+        except Exception as e:
+            logger.error(f"[{transcription_id}] Error during whisper transcription: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+            
+        transcription_time = time.time() - start_time
+        
+        # Log the result details
+        transcribed_text = result['text'].strip() if result and 'text' in result else ""
+        
+        # Extra validation to ensure we're not repeating the same text due to caching
+        if hasattr(transcribe_audio_whisper, 'last_transcription') and (
+            transcribe_audio_whisper.last_transcription == transcribed_text or 
+            (not transcribed_text and transcribe_audio_whisper.last_transcription == "")
+        ):
+            logger.warning(f"[{transcription_id}] Detected repeated transcription: '{transcribed_text or 'empty'}'")
+            
+            # Try forcing different text by adding noise parameter to next call
+            if not hasattr(transcribe_audio_whisper, 'repeat_count'):
+                transcribe_audio_whisper.repeat_count = 0
+            transcribe_audio_whisper.repeat_count += 1
+            
+            # If empty transcription or same text repeatedly, try forcing buffer reset sooner
+            if not transcribed_text or transcribe_audio_whisper.repeat_count > 1:
+                logger.warning(f"[{transcription_id}] {'Empty' if not transcribed_text else 'Same'} text repeated, forcing audio buffer reset")
+                
+                # Reset the counter and clear the last transcription
+                transcribe_audio_whisper.repeat_count = 0
+                transcribe_audio_whisper.last_transcription = None
+                
+                # Signal to the caller that they should reset the buffer
+                return "RESET_BUFFER"
+        else:
+            # Reset repeat counter when we get different text
+            transcribe_audio_whisper.repeat_count = 0
+                
+        # Store for comparison next time
+        transcribe_audio_whisper.last_transcription = transcribed_text
+        
+        # Log detailed results
         if transcribed_text:
-            logger.info(f"Transcribed {audio_duration:.2f}s audio with RMS {audio_rms:.6f}")
+            logger.info(f"[{transcription_id}] Transcribed in {transcription_time:.2f}s: '{transcribed_text}' (length: {len(transcribed_text)})")
+            
+            # Log segments if available for more detailed analysis
+            if 'segments' in result and len(result['segments']) > 0:
+                segments_info = []
+                for i, segment in enumerate(result['segments']):
+                    if 'text' in segment:
+                        segments_info.append(f"[{i}] {segment.get('text', '')[:30]}...")
+                logger.info(f"[{transcription_id}] Segments: {' | '.join(segments_info)}")
+        else:
+            logger.warning(f"[{transcription_id}] Transcription returned empty result after {transcription_time:.2f}s despite valid audio")
         
         return transcribed_text
     except Exception as e:
@@ -302,6 +398,7 @@ def create_unified_emotion_vector(emotion_scores, mapping_dict):
 def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device, video_started_event):
     """Process audio for speech-to-text and emotion analysis"""
     # Add debug logging to track thread execution
+    global audio_buffer  # Declare global at top of function
     logger.info("Audio processing thread started")
     
     try:
@@ -326,18 +423,61 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     continue
                 
                 # Save the latest audio to a temporary file for processing
-                temp_wav = os.path.join(tempfile.gettempdir(), f"affectlink_temp_audio_{int(time.time())}.wav")
-                audio_data = shared_state['latest_audio']
+                temp_wav = os.path.join(tempfile.gettempdir(), f"affectlink_temp_audio_{int(time.time()*1000)}.wav")
+                audio_data = shared_state['latest_audio'].copy()  # Create a copy to avoid race conditions
                 logger.debug(f"Saving audio chunk with {len(audio_data)} samples for processing")
+                
+                # Calculate some basic audio stats for diagnostics
+                audio_mean = np.mean(np.abs(audio_data))
+                audio_max = np.max(np.abs(audio_data))
+                logger.info(f"Audio data stats: mean={audio_mean:.6f}, max={audio_max:.6f}, samples={len(audio_data)}")
+                
+                # Resample to 16kHz for Whisper
                 sf.write(temp_wav, audio_data, 16000)
                 
                 # Transcribe audio to text
                 logger.debug("Transcribing audio...")
                 text = transcribe_audio_whisper(temp_wav, whisper_model)
+                
+                # Use a simple counter for buffer management
+                # Initialize buffer reset counter if it doesn't exist yet
+                if not hasattr(audio_processing_loop, 'buffer_reset_count'):
+                    audio_processing_loop.buffer_reset_count = 0
+                
+                # Increment the counter
+                audio_processing_loop.buffer_reset_count += 1
+                
+                # Every 10 iterations, reset the audio buffer to ensure fresh audio
+                if audio_processing_loop.buffer_reset_count >= 10:
+                    logger.info("Periodically clearing audio buffer to ensure fresh audio")
+                    # audio_buffer already declared as global at top of function
+                    with audio_lock:
+                        audio_buffer.clear()
+                    audio_processing_loop.buffer_reset_count = 0
+                
+                # Track the last few transcriptions to detect if we're stuck in a loop
+                if not hasattr(audio_processing_loop, 'last_texts'):
+                    audio_processing_loop.last_texts = []
+                
                 if text:
                     logger.info(f"Transcribed text: {text[:50]}...")
+                    
+                    # Store this transcription for repeat detection
+                    audio_processing_loop.last_texts.append(text)
+                    if len(audio_processing_loop.last_texts) > 5:
+                        audio_processing_loop.last_texts.pop(0)
+                    
+                    # If we have the same text repeatedly, force a buffer reset
+                    if len(audio_processing_loop.last_texts) >= 3:
+                        if all(t == audio_processing_loop.last_texts[0] for t in audio_processing_loop.last_texts):
+                            logger.warning(f"Detected same transcription {len(audio_processing_loop.last_texts)} times in a row - force clearing buffer")
+                            # Clear the buffer (audio_buffer already declared as global at top of function)
+                            with audio_lock:
+                                audio_buffer.clear()
+                            # Also clear the tracking history
+                            audio_processing_loop.last_texts = []
                 else:
-                    logger.debug("No transcription generated")
+                    logger.warning("No transcription generated - will try again with fresh audio")
 
                 # Get all text emotion scores
                 text_emotion_scores_raw = classifier(text, top_k=None) if text else [] 
@@ -384,6 +524,19 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         os.unlink(temp_wav)
                     except:
                         pass  # Ignore cleanup errors
+                        
+                # Clear part of the audio buffer after successful processing to avoid reprocessing
+                # the same audio constantly - but keep some audio for context
+                if text and len(audio_buffer) > audio_sample_rate * 2:
+                    # Keep the most recent 1 second of audio, clear the rest
+                    logger.info("Partially resetting audio buffer to avoid repetitive transcriptions")
+                    with audio_lock:
+                        # Create a new deque with just the last second of audio
+                        keep_samples = audio_sample_rate * 1
+                        new_buffer = list(audio_buffer)[-keep_samples:]
+                        audio_buffer.clear()
+                        for sample in new_buffer:
+                            audio_buffer.append(sample)
                 
                 # Smoothing text emotions - similar to original but with better error handling
                 if text_emotion:
@@ -460,7 +613,7 @@ def record_audio():
     audio_level_tracker = deque(maxlen=20)  # Track last 20 audio chunks
     last_stats_time = time.time()
     
-    def audio_callback(indata, frames, time, status):
+    def audio_callback(indata, frames, time_, status):
         """Callback for sounddevice to continuously capture audio"""
         nonlocal audio_level_tracker, last_stats_time
         
@@ -478,7 +631,17 @@ def record_audio():
         current_time = time.time()
         if current_time - last_stats_time > 5:  # Every 5 seconds
             avg_level = sum(audio_level_tracker) / len(audio_level_tracker) if audio_level_tracker else 0
-            logger.info(f"Audio levels: current={audio_rms:.6f}, avg={avg_level:.6f}")
+            peak_level = max(audio_level_tracker) if audio_level_tracker else 0
+            logger.info(f"Audio levels: current={audio_rms:.6f}, avg={avg_level:.6f}, peak={peak_level:.6f}, buffer_size={len(audio_buffer)}")
+            
+            # Detailed buffer diagnostics
+            if audio_buffer:
+                buffer_array = np.array(audio_buffer)
+                buffer_min = np.min(buffer_array)
+                buffer_max = np.max(buffer_array)
+                buffer_std = np.std(buffer_array)
+                logger.info(f"Buffer stats: min={buffer_min:.6f}, max={buffer_max:.6f}, std={buffer_std:.6f}")
+            
             if avg_level < 0.001:
                 logger.warning("Audio levels are very low. Is your microphone working and unmuted?")
             last_stats_time = current_time
@@ -486,8 +649,24 @@ def record_audio():
         for sample in audio_data:
             audio_buffer.append(sample)
         
-        # Store the latest audio for processing
-        shared_state['latest_audio'] = np.array(audio_buffer)
+        # Store the latest audio for processing, and check if we have speech
+        audio_array = np.array(audio_buffer)
+        shared_state['latest_audio'] = audio_array
+        
+        # Track silence periods
+        if not hasattr(audio_callback, 'silence_tracker'):
+            audio_callback.silence_tracker = 0
+        
+        # Check if this is essentially silence
+        if audio_rms < 0.001:
+            audio_callback.silence_tracker += 1
+            # Reset buffer after 30 seconds of silence to avoid "I'm glad I found you" syndrome
+            if audio_callback.silence_tracker > 300:  # ~30 seconds if called every 100ms
+                logger.warning("Detected extended silence - resetting audio buffer")
+                audio_buffer.clear()
+                audio_callback.silence_tracker = 0
+        else:
+            audio_callback.silence_tracker = 0  # Reset on non-silent audio
     
     try:
         # Set up the audio stream
@@ -759,13 +938,32 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     
     # Initialize the Whisper model for transcription
     print("Initializing Whisper model...")
-    model = whisper.load_model("tiny")
+    try:
+        # Use base model instead of tiny for better accuracy
+        model = whisper.load_model("base")
+        # Verify whisper model loaded correctly
+        if model is None:
+            logger.error("Failed to initialize Whisper model")
+            return
+        logger.info(f"Whisper model successfully loaded: {type(model).__name__} (base)")
+        
+        # Move model to CUDA if available
+        if hasattr(model, 'to') and torch.cuda.is_available():
+            model = model.to("cuda")
+            logger.info("Whisper model moved to CUDA")
+    except Exception as e:
+        logger.error(f"Error loading Whisper model: {e}")
+        return  # Exit if we can't load the model
     
     # Initialize text emotion classifier
     print("Initializing text emotion classifier...")
-    text_classifier = pipeline("text-classification", 
-                            model="j-hartmann/emotion-english-distilroberta-base", 
-                            top_k=None)
+    try:
+        text_classifier = pipeline("text-classification", 
+                                model="j-hartmann/emotion-english-distilroberta-base", 
+                                top_k=None)
+    except Exception as e:
+        logger.error(f"Error loading text classifier: {e}")
+        return  # Exit if we can't load the classifier
     
     # Initialize audio emotion classifier - using a more accessible model
     print("Initializing audio emotion classifier...")
@@ -774,8 +972,15 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     
     # Use simpler model instead
     model_name = "MIT/ast-finetuned-speech-commands-v2"
-    audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
-    audio_classifier = AutoModelForAudioClassification.from_pretrained(model_name)
+    try:
+        audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+        audio_classifier = AutoModelForAudioClassification.from_pretrained(model_name)
+        
+        # Make sure both are on the same device
+        audio_classifier = audio_classifier.to(device)
+        logger.info(f"Audio classifier successfully loaded and moved to {device}")
+    except Exception as e:
+        logger.error(f"Error loading audio classifier: {e}")
     
     # Event for synchronization between video and audio threads
     video_started_event = threading.Event()
@@ -787,6 +992,9 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     audio_thread = threading.Thread(target=record_audio)
     audio_thread.daemon = True
     audio_thread.start()
+    
+    # Wait a moment for the audio thread to initialize
+    time.sleep(1)
     
     # Create audio analysis data structures
     audio_emotion_log = []
@@ -894,7 +1102,8 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                             # Convert any NumPy float to Python float
                             if isinstance(confidence, np.number):
                                 confidence = float(confidence)
-                            serializable_data[key] = (emotion_name, confidence)
+                            # Store as a dictionary to preserve structure in JSON
+                            serializable_data[key] = {"emotion": emotion_name, "confidence": confidence}
                         elif isinstance(value, np.number):
                             serializable_data[key] = float(value)
                         elif isinstance(value, np.ndarray):

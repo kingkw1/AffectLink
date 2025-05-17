@@ -148,7 +148,14 @@ def update_dashboard():
             st.session_state.last_frame = frame
 
     # Update metrics
-    facial_emotion, facial_confidence = latest_data["facial_emotion"]
+    # Check if facial_emotion is a tuple (old format) or dict (new format)
+    if isinstance(latest_data["facial_emotion"], dict):
+        facial_emotion = latest_data["facial_emotion"]["emotion"]
+        facial_confidence = latest_data["facial_emotion"]["confidence"]
+    else:
+        # Fallback for older format
+        facial_emotion, facial_confidence = latest_data["facial_emotion"]
+        
     facial_emotion_container.metric(
         "Facial Emotion", 
         f"{facial_emotion.capitalize()}", 
@@ -159,14 +166,26 @@ def update_dashboard():
     text_container.markdown(f"**Latest transcription:**  \n{latest_data['transcribed_text']}")
 
     # Update audio emotions
-    text_emotion, text_confidence = latest_data["text_emotion"]
+    if isinstance(latest_data["text_emotion"], dict):
+        text_emotion = latest_data["text_emotion"]["emotion"]
+        text_confidence = latest_data["text_emotion"]["confidence"]
+    else:
+        # Fallback for older format
+        text_emotion, text_confidence = latest_data["text_emotion"]
+    
     text_emotion_container.metric(
         "Text Emotion", 
         f"{text_emotion.capitalize()}", 
         f"{text_confidence:.2f}"
     )
 
-    audio_emotion, audio_confidence = latest_data["audio_emotion"]
+    if isinstance(latest_data["audio_emotion"], dict):
+        audio_emotion = latest_data["audio_emotion"]["emotion"]
+        audio_confidence = latest_data["audio_emotion"]["confidence"]
+    else:
+        # Fallback for older format
+        audio_emotion, audio_confidence = latest_data["audio_emotion"]
+    
     audio_emotion_container.metric(
         "Audio (SER) Emotion", 
         f"{audio_emotion.capitalize()}", 
@@ -356,9 +375,18 @@ if __name__ == "__main__":
                 import random
                 emotions = ['neutral', 'happy', 'sad', 'angry']
                 demo_data = {
-                    "facial_emotion": (random.choice(emotions), random.random()),
-                    "text_emotion": (random.choice(emotions), random.random()),
-                    "audio_emotion": (random.choice(emotions), random.random()),
+                    "facial_emotion": {
+                        "emotion": random.choice(emotions), 
+                        "confidence": random.random()
+                    },
+                    "text_emotion": {
+                        "emotion": random.choice(emotions), 
+                        "confidence": random.random()
+                    },
+                    "audio_emotion": {
+                        "emotion": random.choice(emotions), 
+                        "confidence": random.random()
+                    },
                     "transcribed_text": f"Demo transcription at {timestamp}",
                     "cosine_similarity": random.random(),
                     "consistency_level": "Demo Consistency"
@@ -379,55 +407,4 @@ if __name__ == "__main__":
         # Run the dashboard with our local demo queues
         main(local_emotion_queue, None, local_frame_queue)
         
-    # If we couldn't connect to Manager queues, use demo mode
-    if use_demo:
-        print("Starting dashboard in standalone demo mode")
-        # For standalone testing without Manager, use local queues
-        local_frame_queue = queue.Queue(maxsize=5)
-        local_emotion_queue = queue.Queue(maxsize=10)
-        
-        # Create a demo thread to simulate frames and emotion data
-        def demo_data_provider():
-            """Generate demo data for testing the dashboard standalone"""
-            import numpy as np
-            import time
-            
-            while True:
-                # Create a demo frame (black with timestamp)
-                frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                timestamp = time.strftime("%H:%M:%S")
-                cv2.putText(frame, f"Demo Mode - {timestamp}", (20, 50), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-                
-                # Add the frame to the queue
-                try:
-                    local_frame_queue.put(frame, block=False)
-                except queue.Full:
-                    pass
-                    
-                # Create demo emotion data
-                import random
-                emotions = ['neutral', 'happy', 'sad', 'angry']
-                demo_data = {
-                    "facial_emotion": (random.choice(emotions), random.random()),
-                    "text_emotion": (random.choice(emotions), random.random()),
-                    "audio_emotion": (random.choice(emotions), random.random()),
-                    "transcribed_text": f"Demo transcription at {timestamp}",
-                    "cosine_similarity": random.random(),
-                    "consistency_level": "Demo Consistency"
-                }
-                
-                try:
-                    local_emotion_queue.put(demo_data, block=False)
-                except queue.Full:
-                    pass
-                    
-                time.sleep(1)
-        
-        # Start the demo thread
-        demo_thread = threading.Thread(target=demo_data_provider)
-        demo_thread.daemon = True
-        demo_thread.start()
-        
-        # Run the dashboard with our local demo queues
-        main(local_emotion_queue, None, local_frame_queue)
+    # End of main standalone execution
