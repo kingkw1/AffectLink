@@ -563,6 +563,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     # Update shared state with transcript and text emotion
                     shared_state['transcribed_text'] = text
                     shared_state['text_emotion'] = (text_emotion, text_score)
+                    logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({text_emotion}, {text_score:.2f})") # <--- ADDED LOG
                     
                     # Check if transcription has changed
                     if text != last_transcription:
@@ -623,14 +624,23 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 try:
                     # Use direct analyze_audio_emotion for simplicity
                     audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
-                    if audio_emotion and audio_score:
+                    if audio_emotion and audio_score is not None: # Check audio_score is not None explicitly
                         logger.info(f"Audio emotion: {audio_emotion} ({audio_score:.2f})")
                         # Update the shared state directly for dashboard access
                         shared_state['audio_emotion'] = (audio_emotion, audio_score)
+                        logger.info(f"SHARED_STATE UPDATE: audio_emotion set to ({audio_emotion}, {audio_score:.2f})") # <--- ADDED LOG
                     else:
-                        logger.debug("Audio emotion analysis returned no valid results")
+                        logger.debug("Audio emotion analysis returned no valid results or score was None")
+                        # Ensure shared_state reflects no valid audio emotion if analysis fails
+                        if shared_state.get('audio_emotion') != ("unknown", 0.0):
+                             shared_state['audio_emotion'] = ("unknown", 0.0) # Default to unknown
+                             logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to ('unknown', 0.0) due to failed analysis") # <--- ADDED LOG
+
                 except Exception as audio_err:
                     logger.error(f"Error analyzing audio emotion: {audio_err}")
+                    if shared_state.get('audio_emotion') != ("unknown", 0.0):
+                        shared_state['audio_emotion'] = ("unknown", 0.0) # Default to unknown on error
+                        logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to ('unknown', 0.0) due to exception") # <--- ADDED LOG
                 
                 # Clean up temp file
                 if isinstance(temp_wav, str) and os.path.exists(temp_wav):

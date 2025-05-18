@@ -54,12 +54,13 @@ emotion_data_queue = None
 
 # Store latest emotion data
 latest_data = {
-    "facial_emotion": ("unknown", 0.0),
-    "text_emotion": ("unknown", 0.0),
-    "audio_emotion": ("unknown", 0.0),
+    "facial_emotion": ("unknown", 0.0), # Initial structure as tuple
+    "text_emotion": ("unknown", 0.0),   # Initial structure as tuple
+    "audio_emotion": ("unknown", 0.0),  # Initial structure as tuple
     "transcribed_text": "",
     "cosine_similarity": 0.0,
-    "consistency_level": "Unknown"
+    "consistency_level": "Unknown",
+    "update_id": "initial_0"
 }
 
 # Define emotion colors for visualization
@@ -160,24 +161,45 @@ def update_dashboard():
     """Update dashboard with latest emotion data"""
     global latest_data
     import time  # Make sure time is available throughout the function
+    import json # For parsing emotion data if it comes as a string
 
     # Process updates from the UI update queue
     update_received = False
     force_update = False
+    new_data_from_queue = None
     
     while not ui_update_queue.empty():
         try:
-            new_data = ui_update_queue.get_nowait()
+            raw_data_from_queue = ui_update_queue.get_nowait()
             
+            # Ensure data from queue is a dictionary
+            if isinstance(raw_data_from_queue, str):
+                try:
+                    new_data_from_queue = json.loads(raw_data_from_queue)
+                except json.JSONDecodeError:
+                    print(f"Error decoding JSON from queue: {raw_data_from_queue}")
+                    continue # Skip this item
+            elif isinstance(raw_data_from_queue, dict):
+                new_data_from_queue = raw_data_from_queue
+            else:
+                print(f"Unexpected data type from queue: {type(raw_data_from_queue)}")
+                continue # Skip this item
+
             # Check if this update should force a refresh
-            if new_data.get('force_update', False):
+            if new_data_from_queue.get('force_update', False):
                 force_update = True
                 
-            # Update our data
-            latest_data = new_data
+            # Update our global latest_data with the new data from the queue
+            # This is crucial: ensure latest_data is updated here
+            latest_data.update(new_data_from_queue) 
             update_received = True
+            # Log the update to confirm it's happening
+            # print(f"Dashboard: Updated latest_data from queue. New text: {latest_data.get('transcribed_text', '')[:20]}")
+
         except queue.Empty:
             pass
+        except Exception as e:
+            print(f"Error processing UI update queue: {e}")
             
     # Update a counter to force refresh periodically even if no new data
     if not hasattr(update_dashboard, 'refresh_counter'):
@@ -398,22 +420,19 @@ def update_metrics():
     global latest_data
     
     # Get latest data safely
-    try:
-        # Ensure latest_data is updated from a queue or other source if necessary
-        # This part might need to be reviewed if data isn't appearing as expected
-        pass
-    except Exception as e:
-        # st.warning(f"Debug: Error getting latest data in update_metrics: {e}")
-        pass
+    # No need to try/except here as latest_data is a global dict
     
     # Update facial emotion metric
     try:
+        # Ensure facial_emotion_data is a dict, as expected by detect_emotion.py
         facial_emotion_data = latest_data.get("facial_emotion", {"emotion": "unknown", "confidence": 0.0})
-        if isinstance(facial_emotion_data, dict):
+        if isinstance(facial_emotion_data, tuple) and len(facial_emotion_data) == 2: # Handle old tuple format if necessary
+            facial_emotion, facial_confidence = facial_emotion_data
+        elif isinstance(facial_emotion_data, dict):
             facial_emotion = facial_emotion_data.get("emotion", "unknown")
             facial_confidence = facial_emotion_data.get("confidence", 0.0)
-        else: # Fallback for old tuple format, though unlikely
-            facial_emotion, facial_confidence = facial_emotion_data
+        else:
+            facial_emotion, facial_confidence = "unknown", 0.0
 
         if facial_emotion_container: # Ensure container exists
             facial_emotion_container.metric(
@@ -421,7 +440,7 @@ def update_metrics():
                 f"{facial_emotion.capitalize()} ({facial_confidence:.2f})"
             )
     except Exception as e:
-        # st.warning(f"Debug: Error updating facial emotion metric: {e}")
+        print(f"Debug: Error updating facial emotion metric: {e}")
         pass
 
     # Update transcribed text
@@ -429,11 +448,13 @@ def update_metrics():
         transcribed_text = latest_data.get("transcribed_text", "")
         if text_container: # Ensure container exists
             if transcribed_text:
-                text_container.markdown(f"> {transcribed_text}")
+                # Display the text, removing the timestamp if present for cleaner UI
+                display_text = transcribed_text.split(" [ts:")[0]
+                text_container.markdown(f"> {display_text}")
             else:
                 text_container.markdown("_Waiting for transcription..._")
     except Exception as e:
-        # st.warning(f"Debug: Error updating transcribed text: {e}")
+        print(f"Debug: Error updating transcribed text: {e}")
         pass
     
     # Check if audio processing is disabled (with fallback)
@@ -451,26 +472,44 @@ def update_metrics():
     else:
         # Update text emotion metric
         try:
-            text_emotion, text_confidence = latest_data.get("text_emotion", ("unknown", 0.0))
+            # Ensure text_emotion_data is a dict, as expected by detect_emotion.py
+            text_emotion_data = latest_data.get("text_emotion", {"emotion": "unknown", "confidence": 0.0})
+            if isinstance(text_emotion_data, tuple) and len(text_emotion_data) == 2:
+                text_emotion, text_confidence = text_emotion_data
+            elif isinstance(text_emotion_data, dict):
+                text_emotion = text_emotion_data.get("emotion", "unknown")
+                text_confidence = text_emotion_data.get("confidence", 0.0)
+            else:
+                text_emotion, text_confidence = "unknown", 0.0
+            
             if text_emotion_container: # Ensure container exists
                 text_emotion_container.metric(
                     "Text Emotion", 
                     f"{text_emotion.capitalize()} ({text_confidence:.2f})"
                 )
         except Exception as e:
-            # st.warning(f"Debug: Error updating text emotion metric: {e}")
+            print(f"Debug: Error updating text emotion metric: {e}")
             pass
 
         # Update audio emotion metric
         try:
-            audio_emotion, audio_confidence = latest_data.get("audio_emotion", ("unknown", 0.0))
+            # Ensure audio_emotion_data is a dict, as expected by detect_emotion.py
+            audio_emotion_data = latest_data.get("audio_emotion", {"emotion": "unknown", "confidence": 0.0})
+            if isinstance(audio_emotion_data, tuple) and len(audio_emotion_data) == 2:
+                audio_emotion, audio_confidence = audio_emotion_data
+            elif isinstance(audio_emotion_data, dict):
+                audio_emotion = audio_emotion_data.get("emotion", "unknown")
+                audio_confidence = audio_emotion_data.get("confidence", 0.0)
+            else:
+                audio_emotion, audio_confidence = "unknown", 0.0
+
             if audio_emotion_container: # Ensure container exists
                 audio_emotion_container.metric(
                     "Audio Emotion", 
                     f"{audio_emotion.capitalize()} ({audio_confidence:.2f})"
                 )
         except Exception as e:
-            # st.warning(f"Debug: Error updating audio emotion metric: {e}")
+            print(f"Debug: Error updating audio emotion metric: {e}")
             pass
 
     # Update consistency - only show meaningful consistency when both video and audio are enabled
