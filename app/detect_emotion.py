@@ -884,6 +884,33 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO,
                       format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# Clear any existing frame and emotion files at startup to prevent the dashboard
+# from loading stale data from previous sessions
+def clear_stale_files():
+    """Delete any existing frame and emotion files to ensure a fresh start"""
+    try:
+        import tempfile
+        import os
+        
+        # Define paths
+        frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
+        emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
+        
+        # Delete frame file if it exists
+        if os.path.exists(frame_path):
+            os.remove(frame_path)
+            logger.info(f"Deleted old frame file: {frame_path}")
+        
+        # Delete emotion file if it exists
+        if os.path.exists(emotion_path):
+            os.remove(emotion_path)
+            logger.info(f"Deleted old emotion file: {emotion_path}")
+    except Exception as e:
+        logger.warning(f"Error clearing stale files: {e}")
+
+# Clear stale files at module import time
+clear_stale_files()
+
 def init_webcam(preferred_index=0, try_fallbacks=True):
     """Initialize webcam with fallback options"""
     # Try to set up camera with preferred index first

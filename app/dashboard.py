@@ -26,6 +26,15 @@ if 'enable_audio' not in st.session_state:
     st.session_state.enable_audio = True
 if 'last_frame' not in st.session_state:
     st.session_state.last_frame = None
+# Add a timestamp for the session start to detect fresh frames
+if 'session_start_time' not in st.session_state:
+    st.session_state.session_start_time = time.time()
+# Flag to track if we've seen a new frame this session
+if 'new_frame_received' not in st.session_state:
+    st.session_state.new_frame_received = False
+# Add a flag to track if we've shown the loading animation
+if 'loading_shown' not in st.session_state:
+    st.session_state.loading_shown = True  # Start by showing loading animation
 
 # Add the current directory to sys.path to import local modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -108,13 +117,13 @@ def on_audio_toggle_change():
 def get_consistency_level(cosine_sim):
     """Convert cosine similarity to consistency level label"""
     if cosine_sim >= 0.8:
-        return "High Consistency ✅✅", "green"
+        return "High"
     elif cosine_sim >= 0.6:
-        return "Moderate Consistency ✅", "yellow"
+        return "Medium"
     elif cosine_sim >= 0.3:
-        return "Low Consistency ⚠️", "orange"
+        return "Low"
     else:
-        return "Inconsistent ❌", "red"
+        return "Very Low"
 
 def video_capture_thread():
     """
@@ -232,6 +241,9 @@ def update_dashboard():
                 # Try to get a frame without blocking
                 try:
                     frame = video_frame_queue.get_nowait()
+                    if frame is not None:
+                        st.session_state.new_frame_received = True
+                        # print("Received frame from queue")
                 except (queue.Empty, MPQueueEmpty):
                     # No new frame available
                     pass
@@ -239,6 +251,9 @@ def update_dashboard():
                 # For multiprocessing.Queue
                 try:
                     frame = video_frame_queue.get(block=False)
+                    if frame is not None:
+                        st.session_state.new_frame_received = True
+                        # print("Received frame from multiprocessing queue")
                 except (MPQueueEmpty, Exception):
                     pass
                     
@@ -254,19 +269,26 @@ def update_dashboard():
                         mod_time = os.path.getmtime(frame_path)
                         current_time = time.time()
                         
-                        # Only load if file has been modified since last check or if it's been a while
-                        if (not hasattr(update_dashboard, 'last_frame_time') or 
+                        # Only accept the frame if:
+                        # 1. It was modified after our session started OR
+                        # 2. We've already received a fresh frame this session
+                        fresh_frame = mod_time > st.session_state.session_start_time or st.session_state.new_frame_received
+                        
+                        # Only load if it's a fresh frame and has been modified since last check or if it's been a while
+                        if fresh_frame and (
+                            not hasattr(update_dashboard, 'last_frame_time') or 
                             mod_time > update_dashboard.last_frame_time or
                             (hasattr(update_dashboard, 'last_frame_check') and 
-                            current_time - update_dashboard.last_frame_check > 2)):
+                             current_time - update_dashboard.last_frame_check > 2)):
                             
                             # Try to read the file, with better retry logic for potential file access issues
-                            for attempt in range(5):  # Try up to 5 times (increased from 3)
+                            for attempt in range(5):  # Try up to 5 times
                                 try:
                                     # Use IMREAD_COLOR flag explicitly to ensure correct loading
                                     frame = cv2.imread(frame_path, cv2.IMREAD_COLOR)
                                     if frame is not None and frame.size > 0:
                                         update_dashboard.last_frame_time = mod_time
+                                        st.session_state.new_frame_received = True
                                         
                                         # Log successful frame read occasionally
                                         if not hasattr(update_dashboard, 'read_count'):
@@ -278,10 +300,10 @@ def update_dashboard():
                                         
                                         break
                                     else:
-                                        print(f"Attempt {attempt+1}: Frame read returned None or empty frame")
+                                        #print(f"Attempt {attempt+1}: Frame read returned None or empty frame")
                                         time.sleep(0.05)  # Brief pause before retry
                                 except Exception as retry_err:
-                                    print(f"Retry {attempt+1} reading frame: {retry_err}")
+                                    #print(f"Retry {attempt+1} reading frame: {retry_err}")
                                     time.sleep(0.05 * (attempt + 1))  # Progressively longer delay
                         
                         update_dashboard.last_frame_check = current_time
@@ -308,124 +330,148 @@ def update_dashboard():
                 # Store the frame for later use
                 st.session_state.last_frame = display_frame
                 
+                # Mark that we've received a frame, so we don't show loading animation again
+                if not st.session_state.new_frame_received:
+                    st.session_state.new_frame_received = True
+                    if st.session_state.loading_shown:
+                        st.session_state.loading_shown = False
+                        print("First webcam frame received. Hiding loading animation.")
+                
                 # Track frame update time to detect stale frames
                 if not hasattr(update_dashboard, 'last_frame_update_time'):
                     update_dashboard.last_frame_update_time = time.time()
                 else:
                     update_dashboard.last_frame_update_time = time.time()
-                    
-                # Debug info about successful frame update
-                if hasattr(update_dashboard, 'frame_update_count'):
-                    update_dashboard.frame_update_count += 1
-                else:
-                    update_dashboard.frame_update_count = 1
-                    
-                if update_dashboard.frame_update_count % 10 == 0:  # Log every 10 frames
-                    print(f"Successfully updated video frame #{update_dashboard.frame_update_count}")
             else:
                 print("Received invalid frame for display")
         except Exception as e:
             print(f"Error displaying frame: {e}")
             
-            # Fallback to last good frame if available
-            if 'last_frame' in st.session_state and st.session_state.last_frame is not None:
+            # If we've already seen frames, fallback to the last good frame rather than showing loading
+            if st.session_state.new_frame_received and st.session_state.last_frame is not None:
                 video_container.image(st.session_state.last_frame, channels="RGB", use_container_width=True)
+            else:
+                # First run or no good frame yet - show loading
+                display_loading_indicator()
     else:
-        # No frame received, display message or last frame if available
-        if 'last_frame' in st.session_state and st.session_state.last_frame is not None:
+        # No frame received
+        if st.session_state.new_frame_received and st.session_state.last_frame is not None:
+            # If we've previously gotten frames, display the last good one
             video_container.image(st.session_state.last_frame, channels="RGB", use_container_width=True)
         else:
-            # Display placeholder message
-            video_container.markdown("*Waiting for video feed...*")
+            # Only show loading indicator if we haven't received any frames yet
+            display_loading_indicator()
 
-    # Update metrics
-    # Check if facial_emotion is a tuple (old format) or dict (new format)
-    if isinstance(latest_data["facial_emotion"], dict):
-        facial_emotion = latest_data["facial_emotion"]["emotion"]
-        facial_confidence = latest_data["facial_emotion"]["confidence"]
-    else:
-        # Fallback for older format
-        facial_emotion, facial_confidence = latest_data["facial_emotion"]
-        
-    facial_emotion_container.metric(
-        "Facial Emotion", 
-        f"{facial_emotion.capitalize()}", 
-        f"{facial_confidence:.2f}"
-    )
+def display_loading_indicator():
+    """Display a loading animation while waiting for the webcam to initialize"""
+    # Create a loading animation using a pulsing circle
+    loading_img = np.zeros((300, 400, 3), dtype=np.uint8)
+    
+    # Get current time for the animation
+    t = time.time() % 2  # Cycle every 2 seconds
+    pulse = int(30 * (1 + np.sin(t * np.pi * 2))) + 10  # Radius oscillates between 10 and 70
+    
+    # Draw circle in center
+    center = (200, 150)
+    cv2.circle(loading_img, center, pulse, (50, 120, 200), -1)  # Filled blue circle
+    cv2.circle(loading_img, center, pulse, (255, 255, 255), 2)  # White border
+    
+    # Add text
+    cv2.putText(loading_img, "Loading webcam...", (120, 240), cv2.FONT_HERSHEY_SIMPLEX, 
+                0.7, (255, 255, 255), 2)
+    cv2.putText(loading_img, "Please wait", (150, 270), cv2.FONT_HERSHEY_SIMPLEX, 
+                0.6, (200, 200, 200), 1)
+    
+    # Display loading image
+    video_container.image(loading_img, channels="BGR", use_container_width=True)
+    st.session_state.loading_shown = True
+
+# Define metrics and containers for displaying results
+facial_emotion_container = None
+text_emotion_container = None
+audio_emotion_container = None
+consistency_container = None
+
+# Update function for dashboard metrics
+def update_metrics():
+    """Update the metrics displayed on the dashboard"""
+    global latest_data
+    
+    # Get latest data safely
+    try:
+        # Ensure latest_data is updated from a queue or other source if necessary
+        # This part might need to be reviewed if data isn't appearing as expected
+        pass
+    except Exception as e:
+        # st.warning(f"Debug: Error getting latest data in update_metrics: {e}")
+        pass
+    
+    # Update facial emotion metric
+    try:
+        facial_emotion_data = latest_data.get("facial_emotion", {"emotion": "unknown", "confidence": 0.0})
+        if isinstance(facial_emotion_data, dict):
+            facial_emotion = facial_emotion_data.get("emotion", "unknown")
+            facial_confidence = facial_emotion_data.get("confidence", 0.0)
+        else: # Fallback for old tuple format, though unlikely
+            facial_emotion, facial_confidence = facial_emotion_data
+
+        if facial_emotion_container: # Ensure container exists
+            facial_emotion_container.metric(
+                "Facial Emotion",
+                f"{facial_emotion.capitalize()} ({facial_confidence:.2f})"
+            )
+    except Exception as e:
+        # st.warning(f"Debug: Error updating facial emotion metric: {e}")
+        pass
 
     # Update transcribed text
-    transcribed_text = latest_data.get('transcribed_text', '')
-    
-    # Remove timestamp if present (for cleaner display)
-    if '[' in transcribed_text and ']' in transcribed_text:
-        transcribed_text = transcribed_text.split('[')[0].strip()
-    
-    # Check if we have a new transcription to show
-    if hasattr(update_dashboard, 'last_transcription'):
-        if update_dashboard.last_transcription != transcribed_text and transcribed_text:
-            print(f"Updated dashboard with new transcription: '{transcribed_text[:20]}...'")
-    update_dashboard.last_transcription = transcribed_text
+    try:
+        transcribed_text = latest_data.get("transcribed_text", "")
+        if text_container: # Ensure container exists
+            if transcribed_text:
+                text_container.markdown(f"> {transcribed_text}")
+            else:
+                text_container.markdown("_Waiting for transcription..._")
+    except Exception as e:
+        # st.warning(f"Debug: Error updating transcribed text: {e}")
+        pass
     
     # Check if audio processing is disabled (with fallback)
     audio_enabled = True
     try:
         audio_enabled = st.session_state.enable_audio
     except (AttributeError, KeyError):
-        # Default to enabled if session state not available
-        pass
+        pass # Default to enabled if session state not available
         
     if not audio_enabled:
-        # Display messages indicating audio processing is disabled
-        text_container.markdown("### 🚫 Audio processing disabled")
-        text_container.markdown("*Enable the 'Enable Audio Processing' toggle above to view transcribed audio*")
-        
-        # Display disabled messages in emotion containers with distinctive styling
-        text_emotion_container.metric(
-            "Text Emotion", 
-            "Disabled", 
-            "0.00",
-            delta_color="off"
-        )
-        
-        audio_emotion_container.metric(
-            "Audio (SER) Emotion", 
-            "Disabled", 
-            "0.00",
-            delta_color="off"
-        )
+        if text_emotion_container: # Ensure container exists
+            text_emotion_container.metric("Text Emotion", "Audio Disabled")
+        if audio_emotion_container: # Ensure container exists
+            audio_emotion_container.metric("Audio Emotion", "Audio Disabled")
     else:
-        # Display the transcription with special formatting if it's empty
-        if not transcribed_text:
-            text_container.markdown("**Latest transcription:**  \n*Waiting for speech...*")
-        else:
-            text_container.markdown(f"**Latest transcription:**  \n{transcribed_text}")
+        # Update text emotion metric
+        try:
+            text_emotion, text_confidence = latest_data.get("text_emotion", ("unknown", 0.0))
+            if text_emotion_container: # Ensure container exists
+                text_emotion_container.metric(
+                    "Text Emotion", 
+                    f"{text_emotion.capitalize()} ({text_confidence:.2f})"
+                )
+        except Exception as e:
+            # st.warning(f"Debug: Error updating text emotion metric: {e}")
+            pass
 
-        # Update audio emotions
-        if isinstance(latest_data["text_emotion"], dict):
-            text_emotion = latest_data["text_emotion"]["emotion"]
-            text_confidence = latest_data["text_emotion"]["confidence"]
-        else:
-            # Fallback for older format
-            text_emotion, text_confidence = latest_data["text_emotion"]
-        
-        text_emotion_container.metric(
-            "Text Emotion", 
-            f"{text_emotion.capitalize()}", 
-            f"{text_confidence:.2f}"
-        )
-
-        if isinstance(latest_data["audio_emotion"], dict):
-            audio_emotion = latest_data["audio_emotion"]["emotion"]
-            audio_confidence = latest_data["audio_emotion"]["confidence"]
-        else:
-            # Fallback for older format
-            audio_emotion, audio_confidence = latest_data["audio_emotion"]
-        
-        audio_emotion_container.metric(
-            "Audio (SER) Emotion", 
-            f"{audio_emotion.capitalize()}", 
-            f"{audio_confidence:.2f}"
-        )
+        # Update audio emotion metric
+        try:
+            audio_emotion, audio_confidence = latest_data.get("audio_emotion", ("unknown", 0.0))
+            if audio_emotion_container: # Ensure container exists
+                audio_emotion_container.metric(
+                    "Audio Emotion", 
+                    f"{audio_emotion.capitalize()} ({audio_confidence:.2f})"
+                )
+        except Exception as e:
+            # st.warning(f"Debug: Error updating audio emotion metric: {e}")
+            pass
 
     # Update consistency - only show meaningful consistency when both video and audio are enabled
     # Get toggle states with fallback
@@ -433,36 +479,32 @@ def update_dashboard():
     audio_enabled = True
     try:
         video_enabled = st.session_state.enable_video
+    except (AttributeError, KeyError):
+        pass # Default to enabled if session state not available
+        
+    try:
         audio_enabled = st.session_state.enable_audio
     except (AttributeError, KeyError):
-        # Default to enabled if session state not available
-        pass
+        pass # Default to enabled if session state not available
         
     if not video_enabled or not audio_enabled:
-        # If either audio or video is disabled, show a message indicating consistency can't be calculated
-        disabled_message = ""
-        if not video_enabled and not audio_enabled:
-            disabled_message = "Video & Audio Disabled"
-        elif not video_enabled:
-            disabled_message = "Video Disabled - Cannot Calculate"
-        else:
-            disabled_message = "Audio Disabled - Cannot Calculate"
-            
-        consistency_container.metric(
-            "Emotion Consistency", 
-            disabled_message,
-            "0.00",
-            delta_color="off"
-        )
+        if consistency_container: # Ensure container exists
+            consistency_container.metric("Consistency", "N/A (Video or Audio Disabled)")
     else:
-        # Show normal consistency when both are enabled
-        consistency_level, color = get_consistency_level(latest_data["cosine_similarity"])
-        consistency_container.metric(
-            "Emotion Consistency", 
-            consistency_level,
-            f"{latest_data['cosine_similarity']:.2f}"
-        )
+        # Update consistency metric
+        try:
+            cosine_similarity = latest_data.get("cosine_similarity", 0.0)
+            consistency_level = get_consistency_level(cosine_similarity)
+            if consistency_container: # Ensure container exists
+                consistency_container.metric(
+                    "Facial/Audio Consistency", 
+                    f"{consistency_level} ({cosine_similarity:.2f})"
+                )
+        except Exception as e:
+            # st.warning(f"Debug: Error updating consistency metric: {e}")
+            pass
 
+# Define shared data receiver thread
 def receive_emotion_data_thread(mp_queue, stop_event):
     """Thread to receive emotion data from detect_emotion.py via multiprocessing queue"""
     global should_stop
@@ -695,6 +737,7 @@ def main(emotion_queue=None, stop_event=None, frame_queue=None):
     # Update dashboard in a loop
     while not should_stop:
         update_dashboard()
+        update_metrics()  # Refresh emotion analysis metrics
         
         # Check if stop event is set
         if stop_event and stop_event.is_set():
