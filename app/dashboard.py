@@ -19,6 +19,14 @@ import sys
 import multiprocessing
 from multiprocessing.queues import Empty as MPQueueEmpty
 
+# Initialize session state variables at the very beginning
+if 'enable_video' not in st.session_state:
+    st.session_state.enable_video = True
+if 'enable_audio' not in st.session_state:
+    st.session_state.enable_audio = True
+if 'last_frame' not in st.session_state:
+    st.session_state.last_frame = None
+
 # Add the current directory to sys.path to import local modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -57,6 +65,46 @@ EMOTION_COLORS = {
 # Flag to control when the dashboard should stop
 should_stop = False
 
+# Define global variables to track thread state
+video_thread = None
+audio_thread = None
+stop_event = threading.Event() if not 'stop_event' in globals() else globals()['stop_event']
+
+# Define callback functions for toggle state changes
+def on_video_toggle_change():
+    """Handle changes to the video processing toggle"""
+    # Handle the thread restart directly in the callback
+    try:
+        restart_video_thread(st.session_state.enable_video)
+        
+        # Also put a message in the queue for UI updates
+        if 'ui_update_queue' in globals():
+            globals()['ui_update_queue'].put({
+                'force_update': True,
+                'toggle_changed': True,
+                'video_enabled': st.session_state.enable_video
+            })
+        print(f"Video toggle changed to: {st.session_state.enable_video}")
+    except Exception as e:
+        print(f"Error handling video toggle change: {e}")
+
+def on_audio_toggle_change():
+    """Handle changes to the audio processing toggle"""
+    # Handle the thread restart directly in the callback
+    try:
+        restart_audio_thread(st.session_state.enable_audio)
+        
+        # Also put a message in the queue for UI updates
+        if 'ui_update_queue' in globals():
+            globals()['ui_update_queue'].put({
+                'force_update': True,
+                'toggle_changed': True,
+                'audio_enabled': st.session_state.enable_audio
+            })
+        print(f"Audio toggle changed to: {st.session_state.enable_audio}")
+    except Exception as e:
+        print(f"Error handling audio toggle change: {e}")
+
 def get_consistency_level(cosine_sim):
     """Convert cosine similarity to consistency level label"""
     if cosine_sim >= 0.8:
@@ -75,8 +123,17 @@ def video_capture_thread():
     """
     print("Dashboard video capture thread started")
     
-    # Keep checking the queue until should_stop is set
+    # Keep checking the queue until should_stop is set or video toggle is disabled
     while not should_stop:
+        # Safely check the session state
+        try:
+            if not st.session_state.enable_video:
+                time.sleep(0.5)  # Sleep longer when disabled
+                continue
+        except (AttributeError, KeyError):
+            # Session state might not be ready yet, assume enabled
+            pass
+            
         if not video_frame_queue.full():
             # No need to do anything - the emotion detection process
             # is adding frames to the queue directly
@@ -84,7 +141,7 @@ def video_capture_thread():
         
         # Slow down a bit to reduce CPU usage
         time.sleep(0.03)
-        
+    
     print("Dashboard video capture thread stopped")
 
 # Add a thread-safe queue for passing data to the main thread
@@ -146,73 +203,93 @@ def update_dashboard():
             
         except Exception as e:
             print(f"Error in refresh handling: {e}")
-            update_dashboard.last_forced_update = current_time    # Get latest video frame
+            update_dashboard.last_forced_update = current_time
+    
+    # Get latest video frame (only if video processing is enabled)
     frame = None
+    
+    # Check if video processing is enabled by toggle (with fallback)
+    video_enabled = True
     try:
-        # Check if we have a shared queue or a local queue
-        if video_frame_queue and hasattr(video_frame_queue, 'get_nowait'):
-            # Try to get a frame without blocking
-            try:
-                frame = video_frame_queue.get_nowait()
-            except (queue.Empty, MPQueueEmpty):
-                # No new frame available
-                pass
-        elif video_frame_queue and hasattr(video_frame_queue, 'get'):
-            # For multiprocessing.Queue
-            try:
-                frame = video_frame_queue.get(block=False)
-            except (MPQueueEmpty, Exception):
-                pass
-                
-        # If we couldn't get a frame from the queue, check for saved frame file
-        if frame is None:
-            # Check for frame saved to temporary file by detector
-            import tempfile
-            
-            frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
-            if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
-                try:
-                    # Track file modification time to avoid reloading the same frame repeatedly
-                    mod_time = os.path.getmtime(frame_path)
-                    current_time = time.time()
-                    
-                    # Only load if file has been modified since last check or if it's been a while
-                    if (not hasattr(update_dashboard, 'last_frame_time') or 
-                        mod_time > update_dashboard.last_frame_time or
-                        (hasattr(update_dashboard, 'last_frame_check') and 
-                         current_time - update_dashboard.last_frame_check > 2)):
-                         
-                        # Try to read the file, with better retry logic for potential file access issues
-                        for attempt in range(5):  # Try up to 5 times (increased from 3)
-                            try:
-                                # Use IMREAD_COLOR flag explicitly to ensure correct loading
-                                frame = cv2.imread(frame_path, cv2.IMREAD_COLOR)
-                                if frame is not None and frame.size > 0:
-                                    update_dashboard.last_frame_time = mod_time
-                                    
-                                    # Log successful frame read occasionally
-                                    if not hasattr(update_dashboard, 'read_count'):
-                                        update_dashboard.read_count = 0
-                                    update_dashboard.read_count += 1
-                                    
-                                    if update_dashboard.read_count % 20 == 0:
-                                        print(f"Successfully read frame #{update_dashboard.read_count} from file, shape={frame.shape}")
-                                    
-                                    break
-                                else:
-                                    print(f"Attempt {attempt+1}: Frame read returned None or empty frame")
-                                    time.sleep(0.05)  # Brief pause before retry
-                            except Exception as retry_err:
-                                print(f"Retry {attempt+1} reading frame: {retry_err}")
-                                time.sleep(0.05 * (attempt + 1))  # Progressively longer delay
-                        
-                    update_dashboard.last_frame_check = current_time
-                except Exception as e:
-                    print(f"Error reading frame file: {e}")
-            
-    except Exception as e:
-        print(f"Error retrieving video frame: {e}")
+        video_enabled = st.session_state.enable_video
+    except (AttributeError, KeyError):
+        # Default to enabled if session state not available
         pass
+        
+    if not video_enabled:
+        # If video is disabled, display a message instead of trying to get a frame
+        video_container.markdown("### 🚫 Video processing disabled")
+        video_container.markdown("*Enable the 'Enable Video Processing' toggle above to view video feed*")
+        
+        # Add a visual indicator for disabled state
+        disabled_frame = np.zeros((300, 400, 3), dtype=np.uint8)
+        cv2.putText(disabled_frame, "Video Processing Off", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 100, 100), 2)
+        video_container.image(disabled_frame, channels="BGR", use_container_width=True)
+    else:
+        try:
+            # Check if we have a shared queue or a local queue
+            if video_frame_queue and hasattr(video_frame_queue, 'get_nowait'):
+                # Try to get a frame without blocking
+                try:
+                    frame = video_frame_queue.get_nowait()
+                except (queue.Empty, MPQueueEmpty):
+                    # No new frame available
+                    pass
+            elif video_frame_queue and hasattr(video_frame_queue, 'get'):
+                # For multiprocessing.Queue
+                try:
+                    frame = video_frame_queue.get(block=False)
+                except (MPQueueEmpty, Exception):
+                    pass
+                    
+            # If we couldn't get a frame from the queue, check for saved frame file
+            if frame is None:
+                # Check for frame saved to temporary file by detector
+                import tempfile
+                
+                frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
+                if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
+                    try:
+                        # Track file modification time to avoid reloading the same frame repeatedly
+                        mod_time = os.path.getmtime(frame_path)
+                        current_time = time.time()
+                        
+                        # Only load if file has been modified since last check or if it's been a while
+                        if (not hasattr(update_dashboard, 'last_frame_time') or 
+                            mod_time > update_dashboard.last_frame_time or
+                            (hasattr(update_dashboard, 'last_frame_check') and 
+                            current_time - update_dashboard.last_frame_check > 2)):
+                            
+                            # Try to read the file, with better retry logic for potential file access issues
+                            for attempt in range(5):  # Try up to 5 times (increased from 3)
+                                try:
+                                    # Use IMREAD_COLOR flag explicitly to ensure correct loading
+                                    frame = cv2.imread(frame_path, cv2.IMREAD_COLOR)
+                                    if frame is not None and frame.size > 0:
+                                        update_dashboard.last_frame_time = mod_time
+                                        
+                                        # Log successful frame read occasionally
+                                        if not hasattr(update_dashboard, 'read_count'):
+                                            update_dashboard.read_count = 0
+                                        update_dashboard.read_count += 1
+                                        
+                                        if update_dashboard.read_count % 20 == 0:
+                                            print(f"Successfully read frame #{update_dashboard.read_count} from file, shape={frame.shape}")
+                                        
+                                        break
+                                    else:
+                                        print(f"Attempt {attempt+1}: Frame read returned None or empty frame")
+                                        time.sleep(0.05)  # Brief pause before retry
+                                except Exception as retry_err:
+                                    print(f"Retry {attempt+1} reading frame: {retry_err}")
+                                    time.sleep(0.05 * (attempt + 1))  # Progressively longer delay
+                        
+                        update_dashboard.last_frame_check = current_time
+                    except Exception as e:
+                        print(f"Error reading frame file: {e}")
+            
+        except Exception as e:
+            print(f"Error retrieving video frame: {e}")
         
     # Always attempt to display the frame
     if frame is not None:
@@ -289,46 +366,102 @@ def update_dashboard():
             print(f"Updated dashboard with new transcription: '{transcribed_text[:20]}...'")
     update_dashboard.last_transcription = transcribed_text
     
-    # Display the transcription with special formatting if it's empty
-    if not transcribed_text:
-        text_container.markdown("**Latest transcription:**  \n*Waiting for speech...*")
+    # Check if audio processing is disabled (with fallback)
+    audio_enabled = True
+    try:
+        audio_enabled = st.session_state.enable_audio
+    except (AttributeError, KeyError):
+        # Default to enabled if session state not available
+        pass
+        
+    if not audio_enabled:
+        # Display messages indicating audio processing is disabled
+        text_container.markdown("### 🚫 Audio processing disabled")
+        text_container.markdown("*Enable the 'Enable Audio Processing' toggle above to view transcribed audio*")
+        
+        # Display disabled messages in emotion containers with distinctive styling
+        text_emotion_container.metric(
+            "Text Emotion", 
+            "Disabled", 
+            "0.00",
+            delta_color="off"
+        )
+        
+        audio_emotion_container.metric(
+            "Audio (SER) Emotion", 
+            "Disabled", 
+            "0.00",
+            delta_color="off"
+        )
     else:
-        text_container.markdown(f"**Latest transcription:**  \n{transcribed_text}")
+        # Display the transcription with special formatting if it's empty
+        if not transcribed_text:
+            text_container.markdown("**Latest transcription:**  \n*Waiting for speech...*")
+        else:
+            text_container.markdown(f"**Latest transcription:**  \n{transcribed_text}")
 
-    # Update audio emotions
-    if isinstance(latest_data["text_emotion"], dict):
-        text_emotion = latest_data["text_emotion"]["emotion"]
-        text_confidence = latest_data["text_emotion"]["confidence"]
+        # Update audio emotions
+        if isinstance(latest_data["text_emotion"], dict):
+            text_emotion = latest_data["text_emotion"]["emotion"]
+            text_confidence = latest_data["text_emotion"]["confidence"]
+        else:
+            # Fallback for older format
+            text_emotion, text_confidence = latest_data["text_emotion"]
+        
+        text_emotion_container.metric(
+            "Text Emotion", 
+            f"{text_emotion.capitalize()}", 
+            f"{text_confidence:.2f}"
+        )
+
+        if isinstance(latest_data["audio_emotion"], dict):
+            audio_emotion = latest_data["audio_emotion"]["emotion"]
+            audio_confidence = latest_data["audio_emotion"]["confidence"]
+        else:
+            # Fallback for older format
+            audio_emotion, audio_confidence = latest_data["audio_emotion"]
+        
+        audio_emotion_container.metric(
+            "Audio (SER) Emotion", 
+            f"{audio_emotion.capitalize()}", 
+            f"{audio_confidence:.2f}"
+        )
+
+    # Update consistency - only show meaningful consistency when both video and audio are enabled
+    # Get toggle states with fallback
+    video_enabled = True
+    audio_enabled = True
+    try:
+        video_enabled = st.session_state.enable_video
+        audio_enabled = st.session_state.enable_audio
+    except (AttributeError, KeyError):
+        # Default to enabled if session state not available
+        pass
+        
+    if not video_enabled or not audio_enabled:
+        # If either audio or video is disabled, show a message indicating consistency can't be calculated
+        disabled_message = ""
+        if not video_enabled and not audio_enabled:
+            disabled_message = "Video & Audio Disabled"
+        elif not video_enabled:
+            disabled_message = "Video Disabled - Cannot Calculate"
+        else:
+            disabled_message = "Audio Disabled - Cannot Calculate"
+            
+        consistency_container.metric(
+            "Emotion Consistency", 
+            disabled_message,
+            "0.00",
+            delta_color="off"
+        )
     else:
-        # Fallback for older format
-        text_emotion, text_confidence = latest_data["text_emotion"]
-    
-    text_emotion_container.metric(
-        "Text Emotion", 
-        f"{text_emotion.capitalize()}", 
-        f"{text_confidence:.2f}"
-    )
-
-    if isinstance(latest_data["audio_emotion"], dict):
-        audio_emotion = latest_data["audio_emotion"]["emotion"]
-        audio_confidence = latest_data["audio_emotion"]["confidence"]
-    else:
-        # Fallback for older format
-        audio_emotion, audio_confidence = latest_data["audio_emotion"]
-    
-    audio_emotion_container.metric(
-        "Audio (SER) Emotion", 
-        f"{audio_emotion.capitalize()}", 
-        f"{audio_confidence:.2f}"
-    )
-
-    # Update consistency
-    consistency_level, color = get_consistency_level(latest_data["cosine_similarity"])
-    consistency_container.metric(
-        "Emotion Consistency", 
-        consistency_level,
-        f"{latest_data['cosine_similarity']:.2f}"
-    )
+        # Show normal consistency when both are enabled
+        consistency_level, color = get_consistency_level(latest_data["cosine_similarity"])
+        consistency_container.metric(
+            "Emotion Consistency", 
+            consistency_level,
+            f"{latest_data['cosine_similarity']:.2f}"
+        )
 
 def receive_emotion_data_thread(mp_queue, stop_event):
     """Thread to receive emotion data from detect_emotion.py via multiprocessing queue"""
@@ -345,6 +478,15 @@ def receive_emotion_data_thread(mp_queue, stop_event):
             should_stop = True
             print("Stop event detected in emotion data receiver thread")
             break
+            
+        # Safely check the session state
+        try:
+            if not st.session_state.enable_audio:
+                time.sleep(0.5)  # Sleep longer when disabled
+                continue
+        except (AttributeError, KeyError):
+            # Session state might not be ready yet, assume enabled
+            pass
 
         # First try to get data from the queue if available
         queue_data_received = False
@@ -471,6 +613,12 @@ def receive_emotion_data_thread(mp_queue, stop_event):
             
         # Short sleep to avoid burning CPU
         time.sleep(0.1)
+    
+    # Check which condition caused the thread to stop
+    if should_stop:
+        print("Audio data receiver thread stopped due to global stop flag")
+    else:
+        print("Audio data receiver thread stopped due to audio toggle disabled")
 
 # Main Streamlit app
 st.set_page_config(
@@ -480,6 +628,28 @@ st.set_page_config(
 )
 
 st.title("AffectLink Real-time Multimodal Emotion Analysis")
+
+# Add toggle controls for video and audio processing
+toggle_col1, toggle_col2 = st.columns(2)
+with toggle_col1:
+    # Video processing toggle with on_change callback
+    # Don't set the value parameter since we're using session state
+    st.checkbox(
+        "Enable Video Processing",
+        key="enable_video",
+        on_change=on_video_toggle_change,
+        help="Toggle video processing on/off. When disabled, no video frames will be captured or displayed."
+    )
+
+with toggle_col2:
+    # Audio processing toggle with on_change callback
+    # Don't set the value parameter since we're using session state
+    st.checkbox(
+        "Enable Audio Processing", 
+        key="enable_audio",
+        on_change=on_audio_toggle_change,
+        help="Toggle audio processing on/off. When disabled, no transcription or audio emotion analysis will be shown."
+    )
 
 # Create placeholders for dynamic content
 col1, col2 = st.columns([3, 2])
@@ -508,24 +678,19 @@ with col2:
 # Define the main function for the dashboard application
 def main(emotion_queue=None, stop_event=None, frame_queue=None):
     """Start the Streamlit dashboard using provided IPC queues"""
-    global should_stop, video_frame_queue, emotion_data_queue
+    global should_stop, video_frame_queue, emotion_data_queue, video_thread, audio_thread
     
     # Assign provided queues to global variables
     video_frame_queue = frame_queue
     emotion_data_queue = emotion_queue
-    # Start video capture thread
-    video_thread = threading.Thread(target=video_capture_thread)
-    video_thread.daemon = True
-    video_thread.start()
     
-    # Start emotion data receiving thread if a queue is provided
-    if emotion_data_queue is not None:
-        emotion_thread = threading.Thread(
-            target=receive_emotion_data_thread,
-            args=(emotion_data_queue, stop_event)
-        )
-        emotion_thread.daemon = True
-        emotion_thread.start()
+    # Start video capture thread only if video processing is enabled
+    # Use our helper function for consistency
+    restart_video_thread()
+    
+    # Start emotion data receiving thread if a queue is provided and audio processing is enabled
+    # Use our helper function for consistency
+    restart_audio_thread(queue=emotion_data_queue, stop_evt=stop_event)
     
     # Update dashboard in a loop
     while not should_stop:
@@ -540,6 +705,74 @@ def main(emotion_queue=None, stop_event=None, frame_queue=None):
         time.sleep(0.1)  # Update every 100ms
         
     print("Dashboard loop exited")
+
+# Set up the app first with the functions before defining the UI
+# This ensures functions are defined before use in callbacks
+
+def restart_video_thread(enabled=None):
+    """Safely restart the video thread based on toggle state"""
+    global video_thread, should_stop
+    
+    # If no value is provided, check session state (with fallback)
+    if enabled is None:
+        try:
+            enabled = st.session_state.enable_video
+        except (AttributeError, KeyError):
+            # If session state isn't ready, default to enabled
+            enabled = True
+    
+    # Stop the existing thread if it's running
+    if video_thread and video_thread.is_alive():
+        # The thread will exit on the next loop when checking should_stop
+        # We don't need to set a local stop flag since threads check the global should_stop
+        print("Existing video thread will terminate on next loop")
+    
+    # Only start a new thread if enabled
+    if enabled:
+        video_thread = threading.Thread(target=video_capture_thread)
+        video_thread.daemon = True
+        video_thread.start()
+        print("Video thread started after toggle change")
+    else:
+        print("Video processing disabled, no thread started")
+
+def restart_audio_thread(enabled=None, queue=None, stop_evt=None):
+    """Safely restart the audio thread based on toggle state"""
+    global audio_thread, should_stop, emotion_data_queue
+    
+    # If no value is provided, check session state (with fallback)
+    if enabled is None:
+        try:
+            enabled = st.session_state.enable_audio
+        except (AttributeError, KeyError):
+            # If session state isn't ready, default to enabled
+            enabled = True
+    
+    # If no queue provided, use the global one
+    if queue is None:
+        queue = emotion_data_queue
+    
+    # Stop the existing thread if it's running
+    if audio_thread and audio_thread.is_alive():
+        # The thread will exit on the next loop when checking should_stop
+        print("Existing audio thread will terminate on next loop")
+    
+    # Only start a new thread if enabled and we have a queue
+    if enabled and queue is not None:
+        audio_thread = threading.Thread(
+            target=receive_emotion_data_thread,
+            args=(queue, stop_evt)
+        )
+        audio_thread.daemon = True
+        audio_thread.start()
+        print("Audio thread started after toggle change")
+    else:
+        if not enabled:
+            print("Audio processing disabled, no thread started") 
+        else:
+            print("No audio queue available, cannot start thread")
+
+# We're now using the implementations defined above, removing this duplicate definition
 
 # If run directly (for testing)
 if __name__ == "__main__":
