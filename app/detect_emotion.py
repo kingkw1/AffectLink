@@ -568,7 +568,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     text_emotion = top_text['label']
                     text_score = top_text['score']
                     logger.info(f"Text emotion: {text_emotion} ({text_score:.2f})")
-                    # Update shared state with transcript and text emotion
+                    # Update shared_state with transcript and text emotion
                     shared_state['transcribed_text'] = text
                     shared_state['text_emotion'] = (text_emotion, text_score)
                     logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({text_emotion}, {text_score:.2f})") # <--- ADDED LOG
@@ -631,24 +631,31 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 logger.debug("Analyzing audio emotion...")
                 try:
                     # Use direct analyze_audio_emotion for simplicity
-                    audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, device) # UPDATED call
-                    if audio_emotion and audio_score is not None: # Check audio_score is not None explicitly
-                        logger.info(f"Audio emotion: {audio_emotion} ({audio_score:.2f})")
+                    raw_audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, device)
+                    
+                    # Initialize unified_audio_emotion for broader scope
+                    unified_audio_emotion = "unknown" 
+
+                    if raw_audio_emotion and audio_score is not None: # Check audio_score is not None explicitly
+                        # Map raw SER emotion to unified emotion
+                        unified_audio_emotion = SER_TO_UNIFIED.get(raw_audio_emotion, "unknown")
+                        
+                        logger.info(f"Raw audio emotion: {raw_audio_emotion}, Unified: {unified_audio_emotion} ({audio_score:.2f})")
                         # Update the shared state directly for dashboard access
-                        shared_state['audio_emotion'] = (audio_emotion, audio_score)
-                        logger.info(f"SHARED_STATE UPDATE: audio_emotion set to ({audio_emotion}, {audio_score:.2f})") # <--- ADDED LOG
+                        shared_state['audio_emotion'] = (unified_audio_emotion, audio_score)
+                        logger.info(f"SHARED_STATE UPDATE: audio_emotion set to ({unified_audio_emotion}, {audio_score:.2f})")
                     else:
                         logger.debug("Audio emotion analysis returned no valid results or score was None")
                         # Ensure shared_state reflects no valid audio emotion if analysis fails
                         if shared_state.get('audio_emotion') != ("unknown", 0.0):
                              shared_state['audio_emotion'] = ("unknown", 0.0) # Default to unknown
-                             logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to ('unknown', 0.0) due to failed analysis") # <--- ADDED LOG
+                             logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to (\'unknown\', 0.0) due to failed analysis")
 
                 except Exception as audio_err:
                     logger.error(f"Error analyzing audio emotion: {audio_err}")
                     if shared_state.get('audio_emotion') != ("unknown", 0.0):
                         shared_state['audio_emotion'] = ("unknown", 0.0) # Default to unknown on error
-                        logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to ('unknown', 0.0) due to exception") # <--- ADDED LOG
+                        logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to (\'unknown\', 0.0) due to exception")
                 
                 # Clean up temp file
                 if isinstance(temp_wav, str) and os.path.exists(temp_wav):
@@ -693,8 +700,9 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         logger.error(f"Error in text emotion smoothing: {e}")
                     
                 # Smoothing audio emotions
-                if audio_emotion:
-                    audio_emotion_window.append(audio_emotion)
+                # Use the unified_audio_emotion that was determined earlier in the loop
+                if unified_audio_emotion != "unknown" and audio_score is not None: 
+                    audio_emotion_window.append(unified_audio_emotion) # Use unified_audio_emotion
                     audio_score_window.append(audio_score)
                     try:
                         smoothed_audio_emotion = max(set(audio_emotion_window), key=audio_emotion_window.count)
