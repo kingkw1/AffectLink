@@ -121,7 +121,7 @@ def transcribe_audio_whisper(audio_path, whisper_model):
             logger.info(f"Audio segment RMS values: {', '.join(segment_stats)}")
         
         # If audio is essentially silence, don't bother transcribing
-        if audio_rms < 0.001:  # Very quiet audio
+        if audio_rms < 0.005:  # Increased RMS threshold for silence detection
             logger.warning(f"[{transcription_id}] Audio appears to be silence (RMS={audio_rms:.6f}), skipping transcription")
             return None
             
@@ -142,9 +142,9 @@ def transcribe_audio_whisper(audio_path, whisper_model):
             result = whisper_model.transcribe(
                 audio_path,
                 language="en",  # Force English language
-                temperature=0.2,  # Slightly higher temperature for better diversity
-                no_speech_threshold=0.3,  # Much less aggressive filtering to catch all speech
-                logprob_threshold=-2.0,  # Even less strict token filtering
+                temperature=0.0,  # More deterministic output
+                no_speech_threshold=0.5,  # Slightly less aggressive filtering
+                logprob_threshold=-1.0,  # Default, less permissive
                 condition_on_previous_text=False,  # Don't condition on previous text to avoid repetition
                 initial_prompt="This is a transcription of speech."  # Help the model understand context
             )
@@ -440,13 +440,35 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 audio_max = np.max(np.abs(audio_data))
                 logger.info(f"Audio data stats: mean={audio_mean:.6f}, max={audio_max:.6f}, samples={len(audio_data)}")
                 
-                # Resample to 16kHz for Whisper
+                # Resample to 16kHz for Whisper - audio_data is already 16kHz if audio_sample_rate is 16000
                 sf.write(temp_wav, audio_data, 16000)
+
+                # ADDED: Detailed logging of audio data before transcription
+                if audio_data is not None and audio_data.size > 0:
+                    logger.info(f"APL_PRE_TRANSCRIPTION_AUDIO: samples={len(audio_data)}, duration={len(audio_data)/16000.0:.2f}s, dtype={audio_data.dtype}, min={np.min(audio_data):.4f}, max={np.max(audio_data):.4f}, mean_abs={np.mean(np.abs(audio_data)):.4f}, sum_abs={np.sum(np.abs(audio_data)):.4f}")
+                else:
+                    logger.warning("APL_PRE_TRANSCRIPTION_AUDIO: No audio data or empty audio data before transcription attempt.")
                 
                 # Transcribe audio to text
                 logger.debug("Transcribing audio...")
                 text = transcribe_audio_whisper(temp_wav, whisper_model)
                 
+                if text == "RESET_BUFFER":
+                    logger.warning("Whisper requested buffer reset. Clearing audio buffer.")
+                    with audio_lock:
+                        audio_buffer.clear()
+                        shared_state['latest_audio'] = None
+                        shared_state['transcribed_text'] = "" # Clear current transcription
+                        shared_state['audio_reset_time'] = time.time() # Signal update
+                    # Reset periodic reset counter
+                    if hasattr(audio_processing_loop, 'buffer_reset_count'):
+                        audio_processing_loop.buffer_reset_count = 0
+                    # Clear last texts history to prevent other resets from misfiring
+                    if hasattr(audio_processing_loop, 'last_texts'):
+                        audio_processing_loop.last_texts = []
+                    time.sleep(0.5) # Brief pause after reset
+                    continue # Skip the rest of this iteration
+
                 # Use a simple counter for buffer management
                 # Initialize buffer reset counter if it doesn't exist yet
                 if not hasattr(audio_processing_loop, 'buffer_reset_count'):
@@ -456,7 +478,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 audio_processing_loop.buffer_reset_count += 1
                 
                 # More aggressive buffer management - reset more frequently
-                if audio_processing_loop.buffer_reset_count >= 2:  # Reduced from 3 to 2
+                if audio_processing_loop.buffer_reset_count >= 5:  # Changed from 2 to 5
                     logger.info("Periodically clearing audio buffer to ensure fresh audio")
                     # audio_buffer already declared as global at top of function
                     with audio_lock:
@@ -618,25 +640,19 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         pass  # Ignore cleanup errors
                         
                 # Clear part of the audio buffer more aggressively after successful processing
-                if text and len(audio_buffer) > audio_sample_rate:
-                    # Keep a smaller amount of audio - just 1/4 second, clear the rest
-                    logger.info("Nearly completely resetting audio buffer to avoid repetitive transcriptions")
-                    with audio_lock:
-                        # Create a new deque with just a bit of audio for context
-                        keep_samples = int(audio_sample_rate * 0.25)  # Just quarter second (reduced from 0.5)
-                        new_buffer = list(audio_buffer)[-keep_samples:]
-                        audio_buffer.clear()
-                        for sample in new_buffer:
-                            audio_buffer.append(sample)
-                        
-                        # Force the transcription to update by setting a timed version
-                        # This ensures the dashboard sees it as a new update
-                        current_time = time.time()
-                        shared_state['transcribed_text'] = f"" # Force empty to ensure new transcription
-                        shared_state['buffer_reset_timestamp'] = current_time
-                        
-                        # Log the reset with timestamp
-                        logger.info(f"Audio buffer trimmed at {current_time:.3f}, kept {keep_samples} samples")
+                # REMOVED: This section was too aggressive and might lead to fragmented audio.
+                # if text and len(audio_buffer) > audio_sample_rate:
+                #     logger.info("Nearly completely resetting audio buffer to avoid repetitive transcriptions")
+                #     with audio_lock:
+                #         keep_samples = int(audio_sample_rate * 0.25) 
+                #         new_buffer = list(audio_buffer)[-keep_samples:]
+                #         audio_buffer.clear()
+                #         for sample in new_buffer:
+                #             audio_buffer.append(sample)
+                #         current_time = time.time()
+                #         shared_state['transcribed_text'] = f"" 
+                #         shared_state['buffer_reset_timestamp'] = current_time
+                #         logger.info(f"Audio buffer trimmed at {current_time:.3f}, kept {keep_samples} samples")
                 
                 # Smoothing text emotions - similar to original but with better error handling
                 if text_emotion:
@@ -736,25 +752,27 @@ def record_audio():
             
             # Detailed buffer diagnostics
             if audio_buffer:
-                buffer_array = np.array(audio_buffer)
-                buffer_min = np.min(buffer_array)
-                buffer_max = np.max(buffer_array)
-                buffer_std = np.std(buffer_array)
-                logger.info(f"Buffer stats: min={buffer_min:.6f}, max={buffer_max:.6f}, std={buffer_std:.6f}")
-            
-            if avg_level < 0.001:
+                buffer_array = np.array(list(audio_buffer)) # Convert deque to list then numpy array for stats
+                if buffer_array.size > 0: # Ensure buffer_array is not empty
+                    buffer_min = np.min(buffer_array)
+                    buffer_max = np.max(buffer_array)
+                    buffer_std = np.std(buffer_array)
+                    logger.info(f"Buffer stats: min={buffer_min:.6f}, max={buffer_max:.6f}, std={buffer_std:.6f}")
+                else:
+                    logger.info("Buffer stats: audio_buffer is currently empty for stats calculation.")
+
+            if avg_level < 0.001: # This threshold is for warning, not for stopping transcription
                 logger.warning("Audio levels are very low. Is your microphone working and unmuted?")
             last_stats_time = current_time
         
-        # Add a check here to prevent the buffer from growing too large
-        max_buffer_size = audio_sample_rate * 10  # Maximum 10 seconds of audio
-        if len(audio_buffer) > max_buffer_size:
-            # If buffer is too large, only keep the most recent data
-            logger.warning(f"Audio buffer exceeded max size ({len(audio_buffer)} > {max_buffer_size}), trimming")
-            new_buffer = list(audio_buffer)[-max_buffer_size:]
-            audio_buffer.clear()
-            for sample in new_buffer:
-                audio_buffer.append(sample)
+        # REMOVED: Redundant buffer size check. Deque's maxlen handles this.
+        # max_buffer_size = audio_sample_rate * 10 
+        # if len(audio_buffer) > max_buffer_size:
+        #     logger.warning(f"Audio buffer exceeded max size ({len(audio_buffer)} > {max_buffer_size}), trimming")
+        #     new_buffer = list(audio_buffer)[-max_buffer_size:]
+        #     audio_buffer.clear()
+        #     for sample in new_buffer:
+        #         audio_buffer.append(sample)
             
         # Add new audio data to buffer
         for sample in audio_data:
@@ -762,8 +780,14 @@ def record_audio():
         
         # Store the latest audio for processing
         try:
-            audio_array = np.array(audio_buffer)
-            shared_state['latest_audio'] = audio_array
+            # Ensure audio_buffer is not empty before converting to numpy array
+            if audio_buffer:
+                audio_array = np.array(list(audio_buffer)) # Convert deque to list then numpy array
+                shared_state['latest_audio'] = audio_array
+            else:
+                # If buffer is empty, ensure latest_audio reflects that
+                shared_state['latest_audio'] = np.array([])
+
         except Exception as e:
             logger.error(f"Error updating latest audio: {e}")
         
@@ -870,7 +894,7 @@ audio_feature_extractor = None
 audio_classifier = None
 
 # Audio recording settings
-audio_sample_rate = 44100
+audio_sample_rate = 16000 # Changed from 44100 to 16000
 audio_duration = 5   # Record 5 seconds at a time
 audio_buffer = deque(maxlen=audio_duration * audio_sample_rate)
 last_audio_analysis = time.time() - 10  # Force initial analysis
@@ -1330,3 +1354,148 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
         print("Waiting for threads to finish...")
         # Wait for threads to finish gracefully
         time.sleep(2)
+
+def test_single_audio_transcription(duration=7, model_name="base.en"):
+    """
+    Records a single audio clip, saves it, transcribes it, and prints the result.
+    Helps to test the audio recording and Whisper transcription in isolation.
+    """
+    # Ensure the module-level logger is used (it should be defined in the global scope of detect_emotion.py)
+    logger.info("=== Starting Single Audio Transcription Test ===")
+    
+    # 1. Load Whisper model
+    whisper_model = None
+    try:
+        logger.info(f"Loading Whisper model: {model_name}...")
+        # Ensure whisper is imported if not already at the top of the file
+        import whisper 
+        whisper_model = whisper.load_model(model_name)
+        logger.info(f"Whisper model '{model_name}' loaded successfully.")
+    except Exception as e:
+        logger.error(f"Failed to load Whisper model: {e}")
+        logger.error("Please ensure Whisper is installed correctly (e.g., pip install openai-whisper).")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None
+
+    # 2. Record audio chunk
+    fs = 16000  # Whisper prefers 16kHz
+    logger.info(f"Recording {duration} seconds of audio at {fs}Hz. Please speak clearly.")
+    try:
+        # Ensure sounddevice (sd) and numpy (np) are imported
+        import sounddevice as sd
+        import numpy as np
+        audio_data = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='float32', blocking=True)
+        sd.wait() # Wait for recording to complete
+        logger.info("Audio recording complete.")
+    except Exception as e:
+        logger.error(f"Audio recording failed: {e}")
+        logger.error("Please ensure your microphone is connected and sounddevice is installed correctly.")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None
+
+    if audio_data is None or audio_data.size == 0:
+        logger.error("No audio data recorded. The recording might have failed silently.")
+        return None, None
+    
+    logger.info(f"Recorded audio data shape: {audio_data.shape}, dtype: {audio_data.dtype}, min: {np.min(audio_data):.4f}, max: {np.max(audio_data):.4f}, mean_abs: {np.mean(np.abs(audio_data)):.4f}")
+
+
+    # 3. Save to temporary WAV file
+    temp_wav_path = None
+    try:
+        # Ensure tempfile, os, time, soundfile (sf) are imported
+        import tempfile
+        import os
+        import time
+        import soundfile as sf
+
+        temp_dir = tempfile.gettempdir()
+        temp_wav_filename = f"affectlink_test_audio_{int(time.time())}.wav"
+        temp_wav_path = os.path.join(temp_dir, temp_wav_filename)
+        
+        logger.info(f"Saving audio to temporary file: {temp_wav_path}")
+        sf.write(temp_wav_path, audio_data, fs)
+        logger.info("Audio saved successfully.")
+    except Exception as e:
+        logger.error(f"Failed to save audio to WAV file: {e}")
+        if temp_wav_path and os.path.exists(temp_wav_path):
+            try:
+                os.remove(temp_wav_path) # Clean up partial file
+            except Exception as cleanup_e:
+                logger.error(f"Error cleaning up partial WAV file: {cleanup_e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None, None
+
+    # 4. Transcribe
+    logger.info(f"Starting transcription of {temp_wav_path}...")
+    transcription = transcribe_audio_whisper(temp_wav_path, whisper_model) # transcribe_audio_whisper is already in detect_emotion.py
+
+    if transcription == "RESET_BUFFER": 
+        logger.warning("Transcription function requested a buffer reset, which is not expected in this isolated test.")
+        transcription = None 
+
+    if transcription:
+        logger.info("--- Transcription Result ---")
+        logger.info(f"'{transcription}'")
+        logger.info("----------------------------")
+    else:
+        logger.info("--- No transcription obtained or transcription was empty ---")
+
+    logger.info(f"The recorded audio was saved to: {temp_wav_path}")
+    logger.info("Please listen to this file to verify the audio quality and content.")
+    
+    # We will not delete the file automatically so you can inspect it.
+    # If you want to delete it, uncomment the lines below:
+    # try:
+    #     logger.info(f"Deleting temporary audio file: {temp_wav_path}")
+    #     if os.path.exists(temp_wav_path):
+    #         os.remove(temp_wav_path)
+    # except Exception as e:
+    #     logger.error(f"Could not delete temporary file {temp_wav_path}: {e}")
+    
+    logger.info("=== Single Audio Transcription Test Finished ===")
+    return temp_wav_path, transcription
+
+# Add this at the very end of the file:
+if __name__ == '__main__':
+    # Ensure logging is configured if running this file directly
+    # Use the logger instance that is defined globally in the module, e.g., `logger`
+    # If your global logger is `logger = logging.getLogger('detect_emotion')`
+    
+    # Check if the root logger (which basicConfig configures) has handlers.
+    # Or check a specific logger if you know it (e.g., logger defined in the module global scope)
+    if not logging.getLogger().hasHandlers():
+        logging.basicConfig(level=logging.INFO, 
+                            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # If your module uses a specific logger like `logger = logging.getLogger('detect_emotion')`,
+    # ensure it's also set up.
+    module_logger = logging.getLogger('detect_emotion') # Or __name__ if that's what you used
+    if not module_logger.hasHandlers():
+        # If basicConfig didn't set up for this specific logger, add a handler.
+        # This can happen if another part of the code (or an imported library)
+        # already called basicConfig.
+        console_handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        module_logger.addHandler(console_handler)
+        module_logger.setLevel(logging.INFO) # Ensure the level is set for this logger
+        module_logger.propagate = False # Avoid duplicate messages if root logger also has a handler
+
+    module_logger.info("Running detect_emotion.py directly for testing audio transcription...")
+    
+    # Call the test function
+    # Common model names: "tiny.en", "base.en", "small.en", "medium.en"
+    audio_file_path, result = test_single_audio_transcription(duration=10, model_name="base.en")
+    
+    if result:
+        module_logger.info(f"Transcription Result: '{result}'")
+    else:
+        module_logger.warning("Transcription failed or was empty.")
+    
+    if audio_file_path:
+        module_logger.info(f"Test audio was saved to: {audio_file_path}")
+        module_logger.info("Please listen to this file to check the audio quality.")
