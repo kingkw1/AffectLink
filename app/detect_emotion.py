@@ -231,7 +231,7 @@ def classify_emotion_full(text, classifier):
         print(f"Emotion classification error: {e}")
         return []
 
-def analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mapping, device):
+def analyze_audio_emotion(audio_path, ser_model, ser_processor, device): # REMOVED ser_label_mapping
     """
     Analyze emotion directly from audio using a pre-trained SER model.
     Loads the audio, processes it, and predicts emotion and confidence.
@@ -244,9 +244,7 @@ def analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mappin
 
         # Move inputs to the same device as the model
         model_device = next(ser_model.parameters()).device
-        logger.debug(f"Model is on device: {model_device}")
         
-        # Move inputs to the same device
         for k in inputs:
             inputs[k] = inputs[k].to(model_device)
             
@@ -257,18 +255,31 @@ def analyze_audio_emotion(audio_path, ser_model, ser_processor, ser_label_mappin
         # Get scores
         scores = torch.nn.functional.softmax(logits, dim=1).squeeze().cpu().numpy()
         
-        # Get the most likely emotion
+        # Get the actual labels from the model's config
+        model_labels_dict = ser_model.config.id2label
+        # Create a list of labels, ensuring correct order by index
+        ser_actual_labels = [model_labels_dict[i] for i in sorted(model_labels_dict.keys())]
+
+        logger.info(f"SER_DEBUG: ser_actual_labels from model: {ser_actual_labels}")
+        logger.info(f"SER_DEBUG: raw_scores: {scores.tolist()}")
         top_idx = scores.argmax()
-        emotion = ser_label_mapping[top_idx] if top_idx < len(ser_label_mapping) else "unknown"
+        logger.info(f"SER_DEBUG: top_idx: {top_idx}")
+        logger.info(f"SER_DEBUG: len(ser_actual_labels): {len(ser_actual_labels)}")
+        logger.info(f"SER_DEBUG: condition (top_idx < len(ser_actual_labels)): {top_idx < len(ser_actual_labels)}")
+
+        emotion = ser_actual_labels[top_idx] if top_idx < len(ser_actual_labels) else "unknown"
         confidence = float(scores[top_idx])
         
+        logger.info(f"SER_DEBUG: determined_emotion: {emotion}, determined_confidence: {confidence:.4f}")
+
         return emotion, confidence
     except Exception as e:
-        print(f"Audio emotion analysis error: {e}")
         logger.error(f"Audio emotion analysis error: {e}")
+        import traceback
+        logger.error(traceback.format_exc()) 
         return None, None
 
-def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, ser_label_mapping, device):
+def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, device): # REMOVED ser_label_mapping
     """
     Get full detailed audio emotion analysis
     """
@@ -278,34 +289,31 @@ def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, ser_label_m
         # Process audio
         inputs = ser_processor(waveform, sampling_rate=16000, return_tensors="pt")
         
-        # Move inputs to the same device as the model
         model_device = next(ser_model.parameters()).device
         logger.debug(f"Model is on device: {model_device}")
         
-        # Move inputs to the same device
         for k in inputs:
             inputs[k] = inputs[k].to(model_device)
             
-        # Get logits
         with torch.no_grad():
             logits = ser_model(**inputs).logits
             
-        # Get scores
         scores = torch.nn.functional.softmax(logits, dim=1).squeeze().cpu().numpy()
         
-        # Create emotion-score pairs
+        # Get the actual labels from the model's config
+        model_labels_dict = ser_model.config.id2label
+        ser_actual_labels = [model_labels_dict[i] for i in sorted(model_labels_dict.keys())]
+        
         all_results = []
         for i, score in enumerate(scores):
-            emotion = ser_label_mapping[i] if i < len(ser_label_mapping) else f"unknown-{i}"
+            emotion = ser_actual_labels[i] if i < len(ser_actual_labels) else f"unknown-{i}"
             all_results.append({
                 "emotion": emotion,
                 "score": float(score)
             })
         
-        # Sort by score
         result_sorted = sorted(all_results, key=lambda x: x["score"], reverse=True)
         
-        # Return top emotion, score and full results
         if result_sorted:
             top_emotion = result_sorted[0]["emotion"]
             top_score = result_sorted[0]["score"]
@@ -399,7 +407,7 @@ def create_unified_emotion_vector(emotion_scores, mapping_dict):
         
     return unified_vector
 
-def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, ser_label_mapping, device, video_started_event):
+def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, device, video_started_event): # REMOVED ser_label_mapping
     """Process audio for speech-to-text and emotion analysis"""
     # Add debug logging to track thread execution
     global audio_buffer  # Declare global at top of function
@@ -623,7 +631,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 logger.debug("Analyzing audio emotion...")
                 try:
                     # Use direct analyze_audio_emotion for simplicity
-                    audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, ser_label_mapping, device)
+                    audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, device) # UPDATED call
                     if audio_emotion and audio_score is not None: # Check audio_score is not None explicitly
                         logger.info(f"Audio emotion: {audio_emotion} ({audio_score:.2f})")
                         # Update the shared state directly for dashboard access
@@ -1174,14 +1182,31 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     print(f"Device set to use {device}")
     
     # Use simpler model instead
-    model_name = "MIT/ast-finetuned-speech-commands-v2"
+    model_name = "MIT/ast-finetuned-speech-commands-v2" # THIS IS LIKELY THE WRONG MODEL FOR SER
+    # The SER model used in analyze_audio_emotion is superb/hubert-large-superb-er
+    # Let's ensure we are loading the correct model here for consistency if this `audio_classifier` is indeed the SER model.
+    # Based on the call structure, `audio_classifier` and `audio_feature_extractor` are passed as `ser_model` and `ser_processor`
+    
+    ser_model_name = "superb/hubert-large-superb-er" # Correct SER model
     try:
-        audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
-        audio_classifier = AutoModelForAudioClassification.from_pretrained(model_name)
+        # audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_name) # Original
+        # audio_classifier = AutoModelForAudioClassification.from_pretrained(model_name) # Original
+        
+        audio_feature_extractor = AutoFeatureExtractor.from_pretrained(ser_model_name)
+        audio_classifier = AutoModelForAudioClassification.from_pretrained(ser_model_name)
         
         # Make sure both are on the same device
         audio_classifier = audio_classifier.to(device)
-        logger.info(f"Audio classifier successfully loaded and moved to {device}")
+        logger.info(f"Audio classifier ({ser_model_name}) successfully loaded and moved to {device}")
+
+        # Log the labels from the loaded SER model config
+        if hasattr(audio_classifier, 'config') and hasattr(audio_classifier.config, 'id2label'):
+            model_labels_dict = audio_classifier.config.id2label
+            ser_actual_labels_from_config = [model_labels_dict[i] for i in sorted(model_labels_dict.keys())]
+            logger.info(f"SER_MODEL_LABELS_AT_INIT: {ser_actual_labels_from_config}")
+        else:
+            logger.warning("SER_MODEL_LABELS_AT_INIT: Could not retrieve id2label from SER model config.")
+
     except Exception as e:
         logger.error(f"Error loading audio classifier: {e}")
     
@@ -1211,7 +1236,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
             args=(audio_emotion_log, audio_lock, shared_state['stop_event'], 
                   model, text_classifier, 
                   audio_classifier, audio_feature_extractor, 
-                  list(SER_TO_UNIFIED.keys()), device, video_started_event)
+                  device, video_started_event) # REMOVED list(SER_TO_UNIFIED.keys())
         )
         audio_processing_thread.daemon = True
         audio_processing_thread.start()
