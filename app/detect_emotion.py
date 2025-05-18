@@ -565,13 +565,17 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 text_score = 0.0
                 if text_emotion_scores:
                     top_text = text_emotion_scores[0]
-                    text_emotion = top_text['label']
+                    raw_text_emotion = top_text['label'] # Renamed to raw_text_emotion
                     text_score = top_text['score']
-                    logger.info(f"Text emotion: {text_emotion} ({text_score:.2f})")
-                    # Update shared_state with transcript and text emotion
+                    
+                    # Map raw text emotion to unified emotion
+                    unified_text_emotion = TEXT_TO_UNIFIED.get(raw_text_emotion, "unknown")
+                    
+                    logger.info(f"Raw text emotion: {raw_text_emotion}, Unified: {unified_text_emotion} ({text_score:.2f})")
+                    # Update shared state with transcript and unified text emotion
                     shared_state['transcribed_text'] = text
-                    shared_state['text_emotion'] = (text_emotion, text_score)
-                    logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({text_emotion}, {text_score:.2f})") # <--- ADDED LOG
+                    shared_state['text_emotion'] = (unified_text_emotion, text_score)
+                    logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({unified_text_emotion}, {text_score:.2f})")
                     
                     # Check if transcription has changed
                     if text != last_transcription:
@@ -680,8 +684,8 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 #         logger.info(f"Audio buffer trimmed at {current_time:.3f}, kept {keep_samples} samples")
                 
                 # Smoothing text emotions - similar to original but with better error handling
-                if text_emotion:
-                    emotion_window.append(text_emotion)
+                if unified_text_emotion != "unknown" and text_score is not None: # Use unified_text_emotion and check text_score
+                    emotion_window.append(unified_text_emotion) # Use unified_text_emotion
                     score_window.append(text_score)
                     try:
                         smoothed_emotion = max(set(emotion_window), key=emotion_window.count)
@@ -1115,11 +1119,15 @@ def process_video():
             
             if analysis and len(analysis) > 0:
                 emotions = analysis[0]['emotion']
-                dominant_emotion = analysis[0]['dominant_emotion']
-                confidence = emotions[dominant_emotion] / 100
+                raw_facial_emotion = analysis[0]['dominant_emotion'] # Renamed to raw_facial_emotion
+                confidence = emotions[raw_facial_emotion] / 100
                 
-                # Store the emotion
-                shared_state['facial_emotion'] = (dominant_emotion, confidence)
+                # Map raw facial emotion to unified emotion
+                unified_facial_emotion = FACIAL_TO_UNIFIED.get(raw_facial_emotion, "unknown")
+                
+                # Store the unified emotion
+                shared_state['facial_emotion'] = (unified_facial_emotion, confidence)
+                logger.info(f"Raw facial emotion: {raw_facial_emotion}, Unified: {unified_facial_emotion} ({confidence:.2f})") # Added log
         except Exception as e:
             logger.error(f"Error in facial emotion detection: {e}")
             # Continue processing even if facial detection fails
