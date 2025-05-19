@@ -98,6 +98,8 @@ def get_consistency_level(cosine_sim):
         return "Medium"
     elif cosine_sim >= 0.3:
         return "Low"
+    elif cosine_sim <= 0.01:
+        return "Unknown"
     else:
         return "Very Low"
 
@@ -518,7 +520,7 @@ def update_metrics():
         # Update consistency metric
         try:
             cosine_similarity = latest_data.get("cosine_similarity", 0.0)
-            consistency_level = latest_data.get("consistency_level", "Unknown")
+            consistency_level = get_consistency_level(cosine_similarity)
             if consistency_container: # Ensure container exists
                 consistency_container.metric(
                     "Consistency",
