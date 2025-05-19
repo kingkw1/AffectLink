@@ -209,7 +209,7 @@ def transcribe_audio_whisper(audio_path, whisper_model):
         return None
 
 
-def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, device): # REMOVED ser_label_mapping
+def analyze_audio_emotion_full(audio_path, ser_model, ser_processor): 
     """
     Get full detailed audio emotion analysis
     """
@@ -532,7 +532,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 try:
                     # Use direct analyze_audio_emotion for simplicity
                     # CHANGED to analyze_audio_emotion_full
-                    raw_audio_emotion, audio_score, audio_emotions_full_results = analyze_audio_emotion_full(temp_wav, ser_model, ser_processor, device)
+                    raw_audio_emotion, audio_score, audio_emotions_full_results = analyze_audio_emotion_full(temp_wav, ser_model, ser_processor)
                     
                     # Initialize unified_audio_emotion for broader scope
                     unified_audio_emotion = "unknown" 
@@ -991,6 +991,7 @@ def process_video():
 
                 # Store the determined unified facial emotion and its confidence
                 shared_state['facial_emotion'] = (dominant_unified_emotion, confidence)
+                shared_state['facial_emotion_full_scores'] = emotions # Store all detected facial emotions and scores
                 logger.info(f"Facial emotion: {dominant_unified_emotion} ({confidence:.2f})") # Added log
         except Exception as e:
             logger.error(f"Error in facial emotion detection: {e}")
@@ -1236,7 +1237,11 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                                 confidence = float(confidence)
                             # Store as a dictionary to preserve structure in JSON
                             serializable_data[key] = {"emotion": emotion_name, "confidence": confidence}
-                        elif isinstance(value, np.number):
+                        elif key == "facial_emotion_full_scores": # ADDED THIS BLOCK
+                            # This is a dict, convert its values (scores) to float
+                            serializable_data[key] = {e_name: float(e_score) if isinstance(e_score, np.number) else e_score 
+                                                      for e_name, e_score in value.items()}
+                        elif isinstance(value, np.number): # Handles other top-level np.number types
                             serializable_data[key] = float(value)
                         elif isinstance(value, np.ndarray):
                             serializable_data[key] = value.tolist()
