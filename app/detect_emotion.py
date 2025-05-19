@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+"""
+run_app.py - Main script for AffectLink with improved frame sharing
+between the emotion detection and dashboard processes.
+This script sets up the environment and starts the dashboard and emotion detection processes.
+It handles device detection and initialization.
+Usage:
+    python run_app.py
+"""
+
 import os
 import tempfile
 from collections import deque
@@ -19,16 +29,6 @@ from deepface import DeepFace
 import logging
 import threading
 import numpy as np
-import sys
-
-# Import our video processing helper
-# Add the current directory to sys.path to import local modules
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
-
-# from video_module_loader import get_video_processing_function
-from video_processing import process_frame_for_emotions
 
 # Output verbosity control
 VERBOSE_OUTPUT = False
