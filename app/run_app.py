@@ -27,7 +27,6 @@ detector_process = None
 
 def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
     """Run the emotion detection process with queue for IPC"""
-    print("Starting emotion detection process...")
     try:
         # Import the emotion detection module
         import detect_emotion

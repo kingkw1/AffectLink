@@ -468,7 +468,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     # Map raw text emotion to unified emotion
                     unified_text_emotion = TEXT_TO_UNIFIED.get(raw_text_emotion, "unknown")
                     
-                    logger.info(f"Raw text emotion: {raw_text_emotion}, Unified: {unified_text_emotion} ({text_score:.2f})")
+                    logger.info(f"Text emotion: {unified_text_emotion} ({text_score:.2f})")
                     # Update shared state with transcript and unified text emotion
                     shared_state['transcribed_text'] = text
                     shared_state['text_emotion'] = (unified_text_emotion, text_score)
@@ -541,7 +541,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         # Map raw SER emotion to unified emotion
                         unified_audio_emotion = SER_TO_UNIFIED.get(raw_audio_emotion, "unknown")
                         
-                        logger.info(f"Raw audio emotion: {raw_audio_emotion}, Unified: {unified_audio_emotion} ({audio_score:.2f})")
+                        logger.info(f"Audio emotion: {unified_audio_emotion} ({audio_score:.2f})")
                         # Update the shared state directly for dashboard access
                         shared_state['audio_emotion'] = (unified_audio_emotion, audio_score)
                         if audio_emotions_full_results: # Store full results
@@ -627,19 +627,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
 def record_audio():
     """Record audio continuously and store in shared state"""
     global shared_state, audio_buffer
-    
-    # Print available devices for debugging
-    try:
-        logger.info("Available audio devices:")
-        devices = sd.query_devices()
-        default_input = sd.query_devices(kind='input')
-        logger.info(f"Default input device: {default_input.get('name', 'Unknown')}")
-        for i, device in enumerate(devices):
-            if device.get('max_input_channels', 0) > 0:  # Only input devices
-                logger.info(f"  {i}: {device.get('name', 'Unknown')} (Channels: {device.get('max_input_channels')})")
-    except Exception as e:
-        logger.error(f"Error querying audio devices: {e}")
-    
+        
     # Track audio stats
     audio_level_tracker = deque(maxlen=20)  # Track last 20 audio chunks
     last_stats_time = time.time()
@@ -983,7 +971,7 @@ def process_video():
                 
                 # Store the unified emotion
                 shared_state['facial_emotion'] = (unified_facial_emotion, confidence)
-                logger.info(f"Raw facial emotion: {raw_facial_emotion}, Unified: {unified_facial_emotion} ({confidence:.2f})") # Added log
+                logger.info(f"Facial emotion: {unified_facial_emotion} ({confidence:.2f})") # Added log
         except Exception as e:
             logger.error(f"Error in facial emotion detection: {e}")
             # Continue processing even if facial detection fails
@@ -1052,13 +1040,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     print("Initializing audio emotion classifier...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device set to use {device}")
-    
-    # Use simpler model instead
-    model_name = "MIT/ast-finetuned-speech-commands-v2" # THIS IS LIKELY THE WRONG MODEL FOR SER
-    # The SER model used in analyze_audio_emotion is superb/hubert-large-superb-er
-    # Let's ensure we are loading the correct model here for consistency if this `audio_classifier` is indeed the SER model.
-    # Based on the call structure, `audio_classifier` and `audio_feature_extractor` are passed as `ser_model` and `ser_processor`
-    
+        
     ser_model_name = "superb/hubert-large-superb-er" # Correct SER model
     try:
         # audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_name) # Original
