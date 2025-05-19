@@ -69,15 +69,6 @@ def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
     finally:
         print("Emotion detection process stopped")
 
-# Dashboard entrypoint using Streamlit's internal CLI
-def _dashboard_entry():
-    import sys
-    # Programmatically invoke Streamlit CLI to run the dashboard script
-    from streamlit.web import cli as stcli
-    script_path = os.path.join(current_dir, "dashboard.py")
-    sys.argv = ["streamlit", "run", script_path]
-    stcli.main()
-
 def test_webcam():
     """Test if webcam is available and functioning."""
     print("Testing webcam availability...")
