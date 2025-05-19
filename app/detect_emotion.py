@@ -205,77 +205,6 @@ def transcribe_audio_whisper(audio_path, whisper_model):
         logger.error(traceback.format_exc())
         return None
 
-def classify_emotion(text, classifier):
-    """
-    Classify emotion from text using Hugging Face pipeline.
-    """
-    try:
-        result = classifier(text, top_k=1)[0]
-        return result['label'], result['score']
-    except Exception as e:
-        print(f"Emotion classification error: {e}")
-        return None, None
-
-def classify_emotion_full(text, classifier):
-    """
-    Get full emotion classification results.
-    """
-    try:
-        result = classifier(text, top_k=None)[0]  # returns list of dicts
-        # Sort by score descending
-        result_sorted = sorted(result, key=lambda x: x['score'], reverse=True)
-        return result_sorted
-    except Exception as e:
-        print(f"Emotion classification error: {e}")
-        return []
-
-def analyze_audio_emotion(audio_path, ser_model, ser_processor, device): # REMOVED ser_label_mapping
-    """
-    Analyze emotion directly from audio using a pre-trained SER model.
-    Loads the audio, processes it, and predicts emotion and confidence.
-    """
-    try:
-        # Load audio (mono, 16kHz)
-        waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
-        # Pass numpy array directly to feature extractor
-        inputs = ser_processor(waveform, sampling_rate=16000, return_tensors="pt")
-
-        # Move inputs to the same device as the model
-        model_device = next(ser_model.parameters()).device
-        
-        for k in inputs:
-            inputs[k] = inputs[k].to(model_device)
-            
-        # Get logits
-        with torch.no_grad():
-            logits = ser_model(**inputs).logits
-            
-        # Get scores
-        scores = torch.nn.functional.softmax(logits, dim=1).squeeze().cpu().numpy()
-        
-        # Get the actual labels from the model's config
-        model_labels_dict = ser_model.config.id2label
-        # Create a list of labels, ensuring correct order by index
-        ser_actual_labels = [model_labels_dict[i] for i in sorted(model_labels_dict.keys())]
-
-        logger.info(f"SER_DEBUG: ser_actual_labels from model: {ser_actual_labels}")
-        logger.info(f"SER_DEBUG: raw_scores: {scores.tolist()}")
-        top_idx = scores.argmax()
-        logger.info(f"SER_DEBUG: top_idx: {top_idx}")
-        logger.info(f"SER_DEBUG: len(ser_actual_labels): {len(ser_actual_labels)}")
-        logger.info(f"SER_DEBUG: condition (top_idx < len(ser_actual_labels)): {top_idx < len(ser_actual_labels)}")
-
-        emotion = ser_actual_labels[top_idx] if top_idx < len(ser_actual_labels) else "unknown"
-        confidence = float(scores[top_idx])
-        
-        logger.info(f"SER_DEBUG: determined_emotion: {emotion}, determined_confidence: {confidence:.4f}")
-
-        return emotion, confidence
-    except Exception as e:
-        logger.error(f"Audio emotion analysis error: {e}")
-        import traceback
-        logger.error(traceback.format_exc()) 
-        return None, None
 
 def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, device): # REMOVED ser_label_mapping
     """
@@ -322,18 +251,7 @@ def analyze_audio_emotion_full(audio_path, ser_model, ser_processor, device): # 
     except Exception as e:
         logger.error(f"Audio emotion full analysis error: {e}")
         return "neutral", 0.0, []
-
-def record_audio_chunk(duration=5, fs=16000):
-    """
-    Record audio for specified duration and return as numpy array
-    """
-    try:
-        audio_data = sd.rec(int(duration * fs), samplerate=fs, channels=1, blocking=True)
-        return audio_data.flatten()
-    except Exception as e:
-        print(f"Audio recording error: {e}")
-        return np.zeros(int(duration * fs))  # Return silence on error
-
+    
 def moving_average(scores):
     """
     Calculate moving average for a list of scores
@@ -341,33 +259,6 @@ def moving_average(scores):
     if not scores:
         return 0
     return sum(scores) / len(scores)
-
-def match_multimodal_emotions(video_emotions, audio_emotions, time_threshold=1.0):
-    """
-    Match video and audio emotions based on timestamps
-    """
-    matches = []
-    
-    for video_entry in video_emotions:
-        video_time = video_entry["timestamp"]
-        
-        # Find audio entries close to this video entry
-        close_audio = [
-            audio for audio in audio_emotions
-            if abs(audio["timestamp"] - video_time) <= time_threshold
-        ]
-        
-        if close_audio:
-            # Add matches
-            for audio_entry in close_audio:
-                matches.append({
-                    "video_emotion": video_entry["emotion"],
-                    "audio_emotion": audio_entry["emotion"],
-                    "timestamp": video_time,
-                    "time_diff": abs(audio_entry["timestamp"] - video_time)
-                })
-    
-    return matches
 
 def calculate_cosine_similarity(vector_a, vector_b):
     """
