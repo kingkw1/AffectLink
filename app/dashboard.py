@@ -90,41 +90,6 @@ video_thread = None
 audio_thread = None
 stop_event = threading.Event() if not 'stop_event' in globals() else globals()['stop_event']
 
-# Define callback functions for toggle state changes
-def on_video_toggle_change():
-    """Handle changes to the video processing toggle"""
-    # Handle the thread restart directly in the callback
-    try:
-        restart_video_thread(st.session_state.enable_video)
-        
-        # Also put a message in the queue for UI updates
-        if 'ui_update_queue' in globals():
-            globals()['ui_update_queue'].put({
-                'force_update': True,
-                'toggle_changed': True,
-                'video_enabled': st.session_state.enable_video
-            })
-        print(f"Video toggle changed to: {st.session_state.enable_video}")
-    except Exception as e:
-        print(f"Error handling video toggle change: {e}")
-
-def on_audio_toggle_change():
-    """Handle changes to the audio processing toggle"""
-    # Handle the thread restart directly in the callback
-    try:
-        restart_audio_thread(st.session_state.enable_audio)
-        
-        # Also put a message in the queue for UI updates
-        if 'ui_update_queue' in globals():
-            globals()['ui_update_queue'].put({
-                'force_update': True,
-                'toggle_changed': True,
-                'audio_enabled': st.session_state.enable_audio
-            })
-        print(f"Audio toggle changed to: {st.session_state.enable_audio}")
-    except Exception as e:
-        print(f"Error handling audio toggle change: {e}")
-
 def get_consistency_level(cosine_sim):
     """Convert cosine similarity to consistency level label"""
     if cosine_sim >= 0.8:
@@ -445,9 +410,10 @@ def update_metrics():
             facial_emotion, facial_confidence = "unknown", 0.0
 
         if facial_emotion_container: # Ensure container exists
+            facial_emotion_display = facial_emotion.capitalize() if facial_emotion else "Unknown"
             facial_emotion_container.metric(
                 "Facial Emotion",
-                f"{facial_emotion.capitalize()} ({facial_confidence:.2f})"
+                f"{facial_emotion_display} ({facial_confidence:.2f})"
             )
     except Exception as e:
         print(f"Debug: Error updating facial emotion metric: {e}")
@@ -493,9 +459,10 @@ def update_metrics():
                 text_emotion, text_confidence = "unknown", 0.0
             
             if text_emotion_container: # Ensure container exists
+                text_emotion_display = text_emotion.capitalize() if text_emotion else "Unknown"
                 text_emotion_container.metric(
-                    "Text Emotion", 
-                    f"{text_emotion.capitalize()} ({text_confidence:.2f})"
+                    "Text Emotion",
+                    f"{text_emotion_display} ({text_confidence:.2f})"
                 )
         except Exception as e:
             print(f"Debug: Error updating text emotion metric: {e}")
@@ -514,9 +481,10 @@ def update_metrics():
                 audio_emotion, audio_confidence = "unknown", 0.0
 
             if audio_emotion_container: # Ensure container exists
+                audio_emotion_display = audio_emotion.capitalize() if audio_emotion else "Unknown"
                 audio_emotion_container.metric(
-                    "Audio Emotion", 
-                    f"{audio_emotion.capitalize()} ({audio_confidence:.2f})"
+                    "Audio Emotion",
+                    f"{audio_emotion_display} ({audio_confidence:.2f})"
                 )
         except Exception as e:
             print(f"Debug: Error updating audio emotion metric: {e}")
@@ -525,7 +493,7 @@ def update_metrics():
     # Update consistency - only show meaningful consistency when both video and audio are enabled
     # Get toggle states with fallback
     video_enabled = True
-    audio_enabled = True
+    audio_enabled = True # Already defined above, re-checking for clarity in this block
     try:
         video_enabled = st.session_state.enable_video
     except (AttributeError, KeyError):
@@ -538,34 +506,26 @@ def update_metrics():
         
     if not video_enabled or not audio_enabled:
         if consistency_container: # Ensure container exists
-            consistency_container.metric("Consistency", "N/A (Video or Audio Disabled)")
+            consistency_display = "Video/Audio Disabled"
+            if not video_enabled and not audio_enabled:
+                consistency_display = "Video & Audio Disabled"
+            elif not video_enabled:
+                consistency_display = "Video Disabled"
+            elif not audio_enabled: # This case is covered by the outer if, but good for clarity
+                consistency_display = "Audio Disabled"
+            consistency_container.metric("Consistency", consistency_display)
     else:
         # Update consistency metric
         try:
-            # Ensure cosine_similarity is treated as a float
-            cosine_similarity_raw = latest_data.get("cosine_similarity", 0.0)
-            if isinstance(cosine_similarity_raw, (int, float)):
-                cosine_similarity = float(cosine_similarity_raw)
-            else:
-                # Attempt to convert if it's a string representation of a float
-                try:
-                    cosine_similarity = float(str(cosine_similarity_raw))
-                except ValueError:
-                    cosine_similarity = 0.0 # Default if conversion fails
-            
-            consistency_level = get_consistency_level(cosine_similarity)
-            
-            # Debug log to check values
-            # print(f"DASH_DEBUG: Cosine Sim Raw: {cosine_similarity_raw}, Parsed: {cosine_similarity}, Level: {consistency_level}")
-
+            cosine_similarity = latest_data.get("cosine_similarity", 0.0)
+            consistency_level = latest_data.get("consistency_level", "Unknown")
             if consistency_container: # Ensure container exists
                 consistency_container.metric(
-                    "Facial/Audio Consistency", 
+                    "Consistency",
                     f"{consistency_level} ({cosine_similarity:.2f})"
                 )
         except Exception as e:
-            # st.warning(f"Debug: Error updating consistency metric: {e}")
-            print(f"DASH_DEBUG: Error updating consistency metric: {e}, latest_data: {latest_data.get('cosine_similarity')}")
+            print(f"Debug: Error updating consistency metric: {e}")
             pass
 
 # Define shared data receiver thread
@@ -734,28 +694,6 @@ st.set_page_config(
 )
 
 st.title("AffectLink Real-time Multimodal Emotion Analysis")
-
-# Add toggle controls for video and audio processing
-toggle_col1, toggle_col2 = st.columns(2)
-with toggle_col1:
-    # Video processing toggle with on_change callback
-    # Don't set the value parameter since we're using session state
-    st.checkbox(
-        "Enable Video Processing",
-        key="enable_video",
-        on_change=on_video_toggle_change,
-        help="Toggle video processing on/off. When disabled, no video frames will be captured or displayed."
-    )
-
-with toggle_col2:
-    # Audio processing toggle with on_change callback
-    # Don't set the value parameter since we're using session state
-    st.checkbox(
-        "Enable Audio Processing", 
-        key="enable_audio",
-        on_change=on_audio_toggle_change,
-        help="Toggle audio processing on/off. When disabled, no transcription or audio emotion analysis will be shown."
-    )
 
 # Create placeholders for dynamic content
 col1, col2 = st.columns([3, 2])
