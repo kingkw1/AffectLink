@@ -430,6 +430,13 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
         
         while not (isinstance(stop_flag, dict) and stop_flag.get('stop', False)) and not (hasattr(stop_flag, 'is_set') and stop_flag.is_set()):
             try:
+                # Initialize variables at the start of each loop iteration
+                unified_text_emotion = "unknown"
+                text_score = 0.0
+                raw_audio_emotion = "unknown" # Also initialize raw_audio_emotion
+                audio_score = 0.0 # Also initialize audio_score
+                audio_emotions_full_results = [] # Initialize full audio results
+
                 # Use the audio buffer collected in record_audio
                 if shared_state['latest_audio'] is None or len(shared_state['latest_audio']) < 1000:
                     logger.info("No audio data available yet, waiting...")
