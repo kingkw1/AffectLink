@@ -4,8 +4,6 @@ This module provides functions to work with cameras for emotion detection.
 """
 
 import cv2
-import time
-import os
 
 def find_available_camera(preferred_index=0, use_directshow=True):
     """

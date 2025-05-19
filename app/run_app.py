@@ -11,7 +11,6 @@ import os
 import sys
 import subprocess
 import threading
-import cv2
 
 # Add the current directory to sys.path to import local modules
 current_dir = os.path.dirname(os.path.abspath(__file__))

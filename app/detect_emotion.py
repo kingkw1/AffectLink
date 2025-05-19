@@ -1,23 +1,34 @@
 import os
 import tempfile
-from collections import deque, Counter # Added Counter
+from collections import deque
 import time
 import math
+import hashlib
+import random
+import json
+import shutil
+import traceback # Moved from various functions
 import soundfile as sf
 import torch
 import whisper
-from transformers import pipeline, AutoModelForAudioClassification
+from transformers import pipeline, AutoModelForAudioClassification, AutoFeatureExtractor
 import sounddevice as sd
 import librosa
-from transformers import AutoFeatureExtractor
 import cv2
 from deepface import DeepFace
 import logging
 import threading
 import numpy as np
+import sys
 
 # Import our video processing helper
-from video_module_loader import get_video_processing_function
+# Add the current directory to sys.path to import local modules
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+# from video_module_loader import get_video_processing_function
+from video_processing import process_frame_for_emotions
 
 # Output verbosity control
 VERBOSE_OUTPUT = False
@@ -70,12 +81,6 @@ def transcribe_audio_whisper(audio_path, whisper_model):
     Transcribe audio file using Whisper.
     """
     try:
-        # First check if we actually have valid audio data
-        import soundfile as sf
-        import os
-        import hashlib
-        import random
-        
         # Generate a truly unique ID for this transcription attempt
         # Include more entropy sources to ensure we don't get cached results
         current_time_ms = int(time.time() * 1000)
@@ -148,7 +153,6 @@ def transcribe_audio_whisper(audio_path, whisper_model):
             )
         except Exception as e:
             logger.error(f"[{transcription_id}] Error during whisper transcription: {e}")
-            import traceback
             logger.error(traceback.format_exc())
             return None
             
@@ -201,7 +205,6 @@ def transcribe_audio_whisper(audio_path, whisper_model):
         return transcribed_text
     except Exception as e:
         logger.error(f"Transcription error: {e}")
-        import traceback
         logger.error(traceback.format_exc())
         return None
 
@@ -394,10 +397,9 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         shared_state['audio_reset_time'] = time.time()
                     
                     # Force more variation in reset timing to break potential loops
-                    import random
                     random_sleep = random.uniform(0.2, 0.7)
                     time.sleep(random_sleep)
-                    
+
                     # Reset counter
                     audio_processing_loop.buffer_reset_count = 0
                     
@@ -434,11 +436,10 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                                 # Update with timestamped text to force a change
                                 shared_state['transcribed_text'] = text_with_timestamp
                             
-                            # Force random sleep to introduce variability 
-                            import random
+                            # Force random sleep to introduce variability
                             random_sleep = random.uniform(0.1, 0.5)
                             time.sleep(random_sleep)
-                                
+
                             # Also clear the tracking history and reset counter to trigger faster reset
                             audio_processing_loop.last_texts = []
                             audio_processing_loop.buffer_reset_count = 0
@@ -516,13 +517,12 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                             last_transcription = ""
                             last_transcription_change_time = current_time
                             audio_processing_loop.stuck_counter = 0
-                            
+
                             # Add random delay to help break any patterns
-                            import random
                             random_sleep = random.uniform(0.3, 0.8)
                             time.sleep(random_sleep)
                             logger.info(f"Inserted random delay of {random_sleep:.2f}s after reset")
-                            
+
                             continue  # Skip rest of processing loop
                 else:
                     logger.debug("No text emotions detected")
@@ -630,13 +630,11 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 
             except Exception as e:
                 logger.error(f"Error in audio processing loop: {e}")
-                import traceback
                 logger.error(traceback.format_exc())
                 time.sleep(1)  # Avoid tight loop on errors
             
     except Exception as e:
         logger.error(f"Fatal error in audio processing thread: {e}")
-        import traceback
         logger.error(traceback.format_exc())
     finally:
         logger.info("Audio processing thread stopped")
@@ -766,7 +764,6 @@ def record_audio():
                 
     except Exception as e:
         logger.error(f"Error in audio recording: {e}")
-        import traceback
         logger.error(traceback.format_exc())
     finally:
         logger.info("Audio recording stopped")
@@ -876,7 +873,6 @@ def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_e
 
     except Exception as e:
         logger.error(f"Error in video processing loop: {e}")
-        import traceback
         logger.error(traceback.format_exc())
     finally:
         if cap:
@@ -937,9 +933,6 @@ if not logger.handlers:
 def clear_stale_files():
     """Delete any existing frame and emotion files to ensure a fresh start"""
     try:
-        import tempfile
-        import os
-        
         # Define paths
         frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
         emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
@@ -1071,10 +1064,6 @@ def process_video():
             # Increase the update frequency - save every 2nd frame instead of every 3rd
             # This provides more frequent updates to the dashboard
             if process_video.frame_count % 2 == 0:  # Changed from 3 to 2
-                import tempfile
-                import shutil
-                import random
-                
                 # Add a small random component to filenames to avoid any caching issues
                 random_suffix = random.randint(1000, 9999)
                 
@@ -1253,7 +1242,6 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
         print("Audio processing thread started successfully")
     except Exception as e:
         logger.error(f"Failed to start audio processing thread: {e}")
-        import traceback
         logger.error(traceback.format_exc())
     
     # --- END AUDIO PROCESSING COMPONENTS ---
@@ -1357,11 +1345,6 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                 
                 # Always save to file for dashboard to access - we want to ensure updates
                 try:
-                    import json
-                    import tempfile
-                    import os
-                    import random
-                    
                     # Add a unique identifier to each save to ensure file changes are detected
                     result_data["update_id"] = f"{time.time():.6f}-{random.randint(1000, 9999)}"
                     
@@ -1406,9 +1389,8 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                         os.fsync(f.fileno())  # Ensure data is written to disk
                         
                     # Rename for atomic replacement
-                    import shutil
                     shutil.move(temp_path, emotion_path)
-                    
+
                     # Log success
                     logger.debug(f"Successfully wrote emotion data to {emotion_path}")
                 except Exception as e:
@@ -1440,13 +1422,11 @@ def test_single_audio_transcription(duration=7, model_name="base.en"):
     try:
         logger.info(f"Loading Whisper model: {model_name}...")
         # Ensure whisper is imported if not already at the top of the file
-        import whisper 
         whisper_model = whisper.load_model(model_name)
         logger.info(f"Whisper model '{model_name}' loaded successfully.")
     except Exception as e:
         logger.error(f"Failed to load Whisper model: {e}")
         logger.error("Please ensure Whisper is installed correctly (e.g., pip install openai-whisper).")
-        import traceback
         logger.error(traceback.format_exc())
         return None, None
 
@@ -1455,15 +1435,12 @@ def test_single_audio_transcription(duration=7, model_name="base.en"):
     logger.info(f"Recording {duration} seconds of audio at {fs}Hz. Please speak clearly.")
     try:
         # Ensure sounddevice (sd) and numpy (np) are imported
-        import sounddevice as sd
-        import numpy as np
         audio_data = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='float32', blocking=True)
         sd.wait() # Wait for recording to complete
         logger.info("Audio recording complete.")
     except Exception as e:
         logger.error(f"Audio recording failed: {e}")
         logger.error("Please ensure your microphone is connected and sounddevice is installed correctly.")
-        import traceback
         logger.error(traceback.format_exc())
         return None, None
 
@@ -1478,11 +1455,6 @@ def test_single_audio_transcription(duration=7, model_name="base.en"):
     temp_wav_path = None
     try:
         # Ensure tempfile, os, time, soundfile (sf) are imported
-        import tempfile
-        import os
-        import time
-        import soundfile as sf
-
         temp_dir = tempfile.gettempdir()
         temp_wav_filename = f"affectlink_test_audio_{int(time.time())}.wav"
         temp_wav_path = os.path.join(temp_dir, temp_wav_filename)
@@ -1497,7 +1469,6 @@ def test_single_audio_transcription(duration=7, model_name="base.en"):
                 os.remove(temp_wav_path) # Clean up partial file
             except Exception as cleanup_e:
                 logger.error(f"Error cleaning up partial WAV file: {cleanup_e}")
-        import traceback
         logger.error(traceback.format_exc())
         return None, None
 
