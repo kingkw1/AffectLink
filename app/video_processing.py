@@ -1,4 +1,3 @@
-
 """
 Enhanced video processing module for AffectLink.
 This module provides a robust implementation of the video processing loop
@@ -17,192 +16,80 @@ from deepface import DeepFace
 VIDEO_WINDOW_DURATION = 5  # seconds
 UNIFIED_EMOTIONS = ['neutral', 'happy', 'sad', 'angry']
 
-def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event):
+def process_frame_for_emotions(frame, face_cascade=None): # Added face_cascade for signature consistency
     """
-    Enhanced thread for processing video frames for emotion detection.
-    Uses camera_utils.find_available_camera for robust camera initialization.
+    Processes a single video frame to detect facial emotions.
+
+    Args:
+        frame: The video frame (numpy array) to analyze.
+        face_cascade: Placeholder for compatibility, not directly used by DeepFace backend.
+
+    Returns:
+        A tuple containing:
+            - dominant_emotion_raw (str): The dominant emotion detected (e.g., 'happy', 'sad').
+                                          Returns None if no face or emotion is detected.
+            - confidence (float): The confidence score for the dominant emotion.
+                                  Returns None if no face or emotion is detected.
+            - processed_frame (numpy.ndarray): The frame with emotion annotations drawn on it.
+                                               Returns the original frame if no face is detected.
+            - facial_emotions_full_dict (dict): A dictionary containing all detected emotions
+                                                and their scores (e.g., {'happy': 0.8, 'sad': 0.1}).
+                                                Returns an empty dict if no face/emotion.
     """
-    # First try to get the camera index from environment (set by run_app.py)
-    camera_index = 0  # Default
-    camera_idx_str = os.environ.get('WEBCAM_INDEX')
-    if camera_idx_str:
-        try:
-            camera_index = int(camera_idx_str)
-            print(f"Using camera index {camera_index} from environment")
-        except ValueError:
-            print(f"Invalid camera index in environment: {camera_idx_str}, using default")
-    
-    print(f"Initializing video capture with camera index: {camera_index}")
-    
-    # Import the camera utilities module
+    dominant_emotion_raw = None
+    confidence = None
+    facial_emotions_full_dict = {}
+    processed_frame = frame.copy() # Start with a copy of the original frame
+
     try:
-        from camera_utils import find_available_camera
-        print("Camera utilities module imported successfully")
-        
-        # Get backend preference from environment
-        use_directshow = os.environ.get('WEBCAM_BACKEND', '').lower() == 'directshow'
-        print(f"Backend preference: {'DirectShow' if use_directshow else 'default'}")
-        
-        # Find an available camera
-        camera_idx, backend, cap = find_available_camera(
-            preferred_index=camera_index,
-            use_directshow=use_directshow
+        # Process this frame with DeepFace
+        # Using 'opencv' backend for face detection as it's generally robust
+        # enforce_detection=False allows analysis even if a face isn't perfectly clear,
+        # but we need to handle cases where 'region' or 'dominant_emotion' might be missing.
+        results = DeepFace.analyze(
+            img_path=frame,
+            actions=['emotion'],
+            enforce_detection=False,  # Try to analyze even if detection is not strong
+            detector_backend='opencv',
+            silent=True # Suppress DeepFace's own console logs for cleaner output
         )
         
-        if cap is None:
-            print("Error: Cannot access any webcam. Continuing with audio-only analysis.")
-            # Signal that video processing has attempted to start (even if failed)
-            video_started_event.set()
+        # DeepFace returns a list of dictionaries, one for each detected face.
+        # We'll process the first detected face if available.
+        face_data = results[0] if isinstance(results, list) and len(results) > 0 else (results if isinstance(results, dict) else None)
+
+        if face_data and 'dominant_emotion' in face_data and 'emotion' in face_data:
+            dominant_emotion_raw = face_data['dominant_emotion']
+            facial_emotions_full_dict = face_data['emotion'] # This is the full dictionary of scores
             
-            # Don't stop the entire system, just exit this thread
-            while not stop_flag['stop']:
-                time.sleep(1)  # Keep thread alive but idle
-            return
+            # Get confidence for the dominant emotion
+            if dominant_emotion_raw in facial_emotions_full_dict:
+                confidence = facial_emotions_full_dict[dominant_emotion_raw]
+            else: # Should not happen if dominant_emotion is from the dict, but as a safeguard
+                confidence = 0.0 
+
+            # Draw rectangle and overlay text if region data is available
+            region = face_data.get('region')
+            if region and all(k in region for k in ['x', 'y', 'w', 'h']):
+                x, y, w, h = region['x'], region['y'], region['w'], region['h']
+                cv2.rectangle(processed_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                text_to_display = f"{dominant_emotion_raw} ({confidence:.2f})" if confidence is not None else dominant_emotion_raw
+                text_y = y - 10 if y - 10 > 10 else y + h + 20
+                cv2.putText(processed_frame, text_to_display, (x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        else:
+            # No face detected or emotion data unavailable in the first result
+            # Return values will remain None/empty dict as initialized
+            pass
             
-        print(f"Successfully initialized camera {camera_idx} with {backend} backend")
-        
     except Exception as e:
-        print(f"Error initializing camera: {e}")
-        # Signal that video processing has attempted to start (even if failed)
-        video_started_event.set()
-        
-        # Don't stop the entire system, just exit this thread
-        while not stop_flag['stop']:
-            time.sleep(1)  # Keep thread alive but idle
-        return
-    
-    # Signal that video processing has started
-    video_started_event.set()
-    
-    # For 5-second downsampling
-    window_start_time = time.time()
-    frame_emotions = []
-    
-    retry_count = 0
-    max_retries = 5
-    
-    while not stop_flag['stop']:
-        try:
-            ret, frame = cap.read()
-            if not ret:
-                retry_count += 1
-                print(f"Error: Failed to read video frame. Retry {retry_count}/{max_retries}...")
-                
-                if retry_count >= max_retries:
-                    print("Maximum retries reached. Continuing with audio-only analysis.")
-                    break
-                    
-                # Wait before trying again
-                time.sleep(0.5)
-                continue
-            
-            # Reset retry count on successful frame read
-            retry_count = 0
-            
-            # Process this frame with DeepFace
-            results = DeepFace.analyze(
-                img_path=frame,
-                actions=['emotion'],
-                enforce_detection=False,
-                detector_backend='opencv'
-            )
-            
-            faces = results if isinstance(results, list) else [results]
-            
-            for face in faces:
-                if 'dominant_emotion' in face:
-                    current_time = time.time()
-                    emo = face['dominant_emotion']
-                    confidence = face.get('emotion', {}).get(emo, None)
-                    emotion_scores = face.get('emotion', {})
-                    
-                    # Store this frame's emotion data for the current window
-                    frame_emotions.append({
-                        'timestamp': current_time,
-                        'emotion': emo,
-                        'confidence': confidence,
-                        'emotion_scores': emotion_scores
-                    })
-                    
-                    # Draw rectangle and overlay text
-                    region = face.get('region', {})
-                    x, y, w, h = region.get('x',0), region.get('y',0), region.get('w',0), region.get('h',0)
-                    cv2.rectangle(frame, (x,y), (x+w, y+h), (0,255,0), 2)
-                    text_y = y-10 if y-10>10 else y+h+20
-                    cv2.putText(frame, f"{emo}", (x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-                else:
-                    print("No face detected or emotion data unavailable.")
-                    
-            # Check if we've reached the end of a 5-second window
-            current_time = time.time()
-            if current_time - window_start_time >= VIDEO_WINDOW_DURATION and frame_emotions:
-                # Calculate average scores for each emotion category
-                unified_emotion_scores = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
-                count = 0
-                
-                for frame_data in frame_emotions:
-                    raw_scores = frame_data.get('emotion_scores', {})
-                    # Map DeepFace emotions to our unified set and accumulate scores
-                    if 'neutral' in raw_scores:
-                        unified_emotion_scores['neutral'] += raw_scores.get('neutral', 0)
-                    if 'happy' in raw_scores:
-                        unified_emotion_scores['happy'] += raw_scores.get('happy', 0)
-                    if 'sad' in raw_scores:
-                        unified_emotion_scores['sad'] += raw_scores.get('sad', 0)
-                    if 'angry' in raw_scores:
-                        unified_emotion_scores['angry'] += raw_scores.get('angry', 0)
-                    count += 1
-                
-                if count > 0:
-                    # Average the scores
-                    for emotion in unified_emotion_scores:
-                        unified_emotion_scores[emotion] /= count
-                    
-                    # Find the dominant emotion from the averaged scores
-                    dominant_emotion = max(unified_emotion_scores.items(), key=lambda x: x[1])
-                    dominant_label = dominant_emotion[0]
-                    dominant_score = dominant_emotion[1]
-                    
-                    # Create the aggregated video emotion entry
-                    aggregated_entry = {
-                        'timestamp': current_time,  # End of the 5-second window
-                        'emotion': dominant_label,
-                        'confidence': dominant_score,
-                        'emotion_scores': unified_emotion_scores
-                    }
-                    
-                    # Add to video emotions log with lock
-                    with video_lock:
-                        video_emotions.append(aggregated_entry)
-                
-                # Reset for next window
-                window_start_time = current_time
-                frame_emotions = []
-                  # Instead of displaying the frame locally, just add the processed frame to the shared data
-            # This allows the dashboard to access the frames without opening the camera again
-            try:
-                # Check if we have an emotion_queue (used by the dashboard)
-                if 'shared_frame_data' in stop_flag and stop_flag['shared_frame_data'] is not None:
-                    # Add the current frame to the shared data
-                    if hasattr(stop_flag['shared_frame_data'], 'put'):
-                        # Convert to RGB for Streamlit
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        try:
-                            stop_flag['shared_frame_data'].put(frame_rgb, block=False)
-                        except Exception:
-                            pass  # Queue might be full, just skip this frame
-            except Exception as e:
-                print(f"Warning: Could not share frame: {e}")
-                
-        except Exception as e:
-            print(f"Video analysis error: {e}")
-            time.sleep(0.1)  # Prevent tight loop in case of repeated errors
-              # Clean up resources
-    if cap is not None and cap.isOpened():
-        try:
-            cap.release()
-        except Exception as e:
-            print(f"Error releasing camera: {e}")
-            
-    # No need to destroy windows since we're not showing any
-    print("Video processing thread stopped")
+        # Log error, but don't crash. Return Nones and original frame.
+        # Using print for now as logger might not be configured here when run standalone
+        # In a real app, this should use a logger instance.
+        print(f"Error in process_frame_for_emotions: {e}")
+        # Ensure defaults are returned on error
+        dominant_emotion_raw = None
+        confidence = None
+        facial_emotions_full_dict = {}
+        # processed_frame is already a copy of the original frame
+
+    return dominant_emotion_raw, confidence, processed_frame, facial_emotions_full_dict

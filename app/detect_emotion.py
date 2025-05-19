@@ -1,7 +1,6 @@
 import os
 import tempfile
-import wave
-from collections import deque
+from collections import deque, Counter # Added Counter
 import time
 import math
 import soundfile as sf
@@ -15,7 +14,6 @@ import cv2
 from deepface import DeepFace
 import logging
 import threading
-from moviepy import VideoFileClip
 import numpy as np
 
 # Import our video processing helper
@@ -410,7 +408,7 @@ def create_unified_emotion_vector(emotion_scores, mapping_dict):
 def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, device, video_started_event): # REMOVED ser_label_mapping
     """Process audio for speech-to-text and emotion analysis"""
     # Add debug logging to track thread execution
-    global audio_buffer  # Declare global at top of function
+    global audio_buffer, shared_state  # Declare global at top of function
     logger.info("Audio processing thread started")
     
     # Add a timestamp to track how long we've had the same transcription
@@ -635,7 +633,8 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 logger.debug("Analyzing audio emotion...")
                 try:
                     # Use direct analyze_audio_emotion for simplicity
-                    raw_audio_emotion, audio_score = analyze_audio_emotion(temp_wav, ser_model, ser_processor, device)
+                    # CHANGED to analyze_audio_emotion_full
+                    raw_audio_emotion, audio_score, audio_emotions_full_results = analyze_audio_emotion_full(temp_wav, ser_model, ser_processor, device)
                     
                     # Initialize unified_audio_emotion for broader scope
                     unified_audio_emotion = "unknown" 
@@ -647,19 +646,24 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         logger.info(f"Raw audio emotion: {raw_audio_emotion}, Unified: {unified_audio_emotion} ({audio_score:.2f})")
                         # Update the shared state directly for dashboard access
                         shared_state['audio_emotion'] = (unified_audio_emotion, audio_score)
+                        if audio_emotions_full_results: # Store full results
+                            shared_state['audio_emotion_full_scores'] = audio_emotions_full_results
+
                         logger.info(f"SHARED_STATE UPDATE: audio_emotion set to ({unified_audio_emotion}, {audio_score:.2f})")
                     else:
                         logger.debug("Audio emotion analysis returned no valid results or score was None")
                         # Ensure shared_state reflects no valid audio emotion if analysis fails
                         if shared_state.get('audio_emotion') != ("unknown", 0.0):
                              shared_state['audio_emotion'] = ("unknown", 0.0) # Default to unknown
-                             logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to (\'unknown\', 0.0) due to failed analysis")
+                             shared_state['audio_emotion_full_scores'] = [] # Clear scores
+                             logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to (\\'unknown\\', 0.0) due to failed analysis")
 
                 except Exception as audio_err:
                     logger.error(f"Error analyzing audio emotion: {audio_err}")
                     if shared_state.get('audio_emotion') != ("unknown", 0.0):
                         shared_state['audio_emotion'] = ("unknown", 0.0) # Default to unknown on error
-                        logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to (\'unknown\', 0.0) due to exception")
+                        shared_state['audio_emotion_full_scores'] = [] # Clear scores
+                        logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to (\\'unknown\\', 0.0) due to exception")
                 
                 # Clean up temp file
                 if isinstance(temp_wav, str) and os.path.exists(temp_wav):
@@ -794,15 +798,6 @@ def record_audio():
             if avg_level < 0.001: # This threshold is for warning, not for stopping transcription
                 logger.warning("Audio levels are very low. Is your microphone working and unmuted?")
             last_stats_time = current_time
-        
-        # REMOVED: Redundant buffer size check. Deque's maxlen handles this.
-        # max_buffer_size = audio_sample_rate * 10 
-        # if len(audio_buffer) > max_buffer_size:
-        #     logger.warning(f"Audio buffer exceeded max size ({len(audio_buffer)} > {max_buffer_size}), trimming")
-        #     new_buffer = list(audio_buffer)[-max_buffer_size:]
-        #     audio_buffer.clear()
-        #     for sample in new_buffer:
-        #         audio_buffer.append(sample)
             
         # Add new audio data to buffer
         for sample in audio_data:
@@ -879,21 +874,120 @@ def record_audio():
         logger.info("Audio recording stopped")
 
 def video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event):
-    """Wrapper around the video processing loop"""
-    # Get the external video processing function
-    external_function = get_video_processing_function()
-    
-    if external_function:
-        # Use our external implementation
-        return external_function(video_emotions, video_lock, stop_flag, video_started_event)
-    else:
-        # Fall back to the original implementation 
-        from detect_emotion import video_processing_loop as original_video_processing_loop
-        print("Using original video_processing_loop")
-        return original_video_processing_loop(video_emotions, video_lock, stop_flag, video_started_event)
+    global shared_state, face_cascade # Ensure face_cascade is accessible
+    logger.info("Video processing thread started")
+
+    # Get the video processing function (e.g., process_video_frame from video_processing.py)
+    video_processing_function = get_video_processing_function()
+    if not video_processing_function:
+        logger.error("Failed to load video processing function. Video analysis will not work.")
+        video_started_event.set() # Signal that video (attempted) start, to unblock audio
+        return
+
+    # Initialize webcam
+    cap = init_webcam(preferred_index=CAMERA_INDEX)
+    if cap is None:
+        logger.error("Failed to initialize webcam. Video analysis disabled.")
+        shared_state['latest_frame'] = None # Ensure no stale frame
+        video_started_event.set() # Signal that video (attempted) start
+        return
+
+    logger.info("Webcam initialized successfully.")
+    video_started_event.set() # Signal that video processing has actually started
+
+    frame_count = 0
+    last_analysis_time = time.time()
+
+    try:
+        while not stop_flag.is_set():
+            ret, frame = cap.read()
+            if not ret:
+                logger.warning("Failed to grab frame from webcam.")
+                time.sleep(0.1)
+                continue
+
+            # Store the latest raw frame for the dashboard (if needed by dashboard directly)
+            # For AffectLink, we primarily save the processed frame with emotion overlay
+            # shared_state['latest_raw_frame'] = frame.copy() 
+
+            current_time = time.time()
+            # Process frame at a reduced rate to save CPU, e.g., every 0.2 seconds (5 FPS for analysis)
+            if current_time - last_analysis_time < 0.2: 
+                time.sleep(0.05)
+                continue
+            
+            last_analysis_time = current_time
+
+            # Perform facial emotion analysis using the loaded function
+            # This function should handle face detection and emotion recognition
+            # It's expected to return: dominant_emotion, confidence, processed_frame, all_emotion_scores_dict
+            dominant_emotion_raw, confidence, frame_to_display, facial_emotions_full_dict = video_processing_function(
+                frame, face_cascade # Pass the globally initialized face_cascade
+            )
+            logger.info(f"DETECT_EMOTION_DEBUG: video_processing_function returned facial_emotions_full_dict: {facial_emotions_full_dict}") # ADDED LOG
+
+            if dominant_emotion_raw and confidence is not None:
+                # Map raw facial emotion to unified emotion
+                unified_facial_emotion = FACIAL_TO_UNIFIED.get(dominant_emotion_raw.lower(), "unknown")
+                
+                logger.info(f"Raw facial emotion: {dominant_emotion_raw}, Unified: {unified_facial_emotion} ({confidence:.2f})")
+                
+                # Update shared state with the top emotion and full scores
+                shared_state['facial_emotion'] = (unified_facial_emotion, confidence)
+                if facial_emotions_full_dict: # This is the dict {'sad': score, ...}
+                    shared_state['facial_emotion_full_scores'] = facial_emotions_full_dict
+                
+                log_entry = {
+                    'timestamp': time.time(),
+                    'modality': 'video',
+                    'emotion': unified_facial_emotion,
+                    'confidence': confidence,
+                    'emotion_scores': facial_emotions_full_dict # Store the full dict
+                }
+                with video_lock:
+                    video_emotions.append(log_entry)
+            else:
+                # If no face detected or emotion analysis failed, ensure frame is still updated
+                # And reset emotion to neutral or unknown
+                shared_state['facial_emotion'] = ("neutral", 0.0) # Default if no face/emotion
+                shared_state['facial_emotion_full_scores'] = {} # Clear scores
+
+            # Update shared state with the latest processed frame for the dashboard
+            if frame_to_display is not None:
+                shared_state['latest_frame'] = frame_to_display.copy()
+                # Save frame to a temporary file for the dashboard to pick up
+                try:
+                    temp_frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
+                    cv2.imwrite(temp_frame_path, frame_to_display)
+                except Exception as e:
+                    logger.error(f"Error saving frame to temp file: {e}")
+            else: # If frame_to_display is None (e.g. error in processing)
+                shared_state['latest_frame'] = frame.copy() # Fallback to raw frame
+                try:
+                    temp_frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
+                    cv2.imwrite(temp_frame_path, frame) # Save raw frame
+                except Exception as e:
+                    logger.error(f"Error saving raw fallback frame to temp file: {e}")
+
+
+            frame_count += 1
+            if frame_count % 100 == 0: # Log every 100 frames
+                logger.info(f"Processed {frame_count} video frames.")
+            
+            time.sleep(0.01) # Small sleep to yield CPU
+
+    except Exception as e:
+        logger.error(f"Error in video processing loop: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        if cap:
+            cap.release()
+        logger.info("Video processing thread stopped")
+        video_started_event.set() # Ensure it's set even on error exit
 
 # Suppress DeepFace logging for cleaner console output
-logging.getLogger().setLevel(logging.ERROR)
+logging.getLogger('deepface').setLevel(logging.ERROR) # Changed to target 'deepface' specifically
 
 # Add logging for debug information
 logging.basicConfig(level=logging.INFO, 
@@ -906,11 +1000,13 @@ shared_state = {
     'stop_event': None,        # Event for stopping the process
     'latest_audio': None,      # Latest audio data
     'latest_frame': None,      # Latest video frame
-    'transcribed_text': "",    # Latest transcribed text
-    'facial_emotion': ("neutral", 1.0),  # Latest facial emotion
-    'audio_emotion': ("neutral", 1.0),   # Latest audio emotion
-    'text_emotion': ("neutral", 1.0),    # Latest text emotion
+    'transcribed_text': "Waiting for audio transcription...",    # Latest transcribed text - UPDATED
+    'facial_emotion': ("neutral", 0.0),  # Latest facial emotion - UPDATED
+    'audio_emotion': ("neutral", 0.0),   # Latest audio emotion - UPDATED
+    'text_emotion': ("neutral", 0.0),    # Latest text emotion - UPDATED
     'overall_emotion': "neutral",         # Combined overall emotion
+    'facial_emotion_full_scores': {}, # Dict: {'raw_label': score, ...} - ADDED
+    'audio_emotion_full_scores': [],  # List of dicts: [{'emotion': 'raw_label', 'score': score}, ...] - ADDED
 }
 
 # Reusable whisper model instance
@@ -1308,6 +1404,29 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
             if shared_state['transcribed_text'] and text_emotion != "neutral":
                 print(f"Text emotion: {text_emotion} ({text_score:.2f}) - '{shared_state['transcribed_text'][:30]}...'")
             
+            # --- Calculate Facial/Audio Consistency ---
+            logger.info("HARDCODED_TEST_LOG: Inside consistency block") # ADDED FOR DEBUGGING
+            facial_full_scores_dict = shared_state.get('facial_emotion_full_scores', {})
+            audio_full_scores_list = shared_state.get('audio_emotion_full_scores', [])
+
+            # Convert audio scores list to dict format if it's a list of dicts
+            # Expected format for audio_full_scores_list: [{'emotion': 'neu', 'score': 0.7}, ...]
+            audio_scores_dict = {e['emotion']: e['score'] for e in audio_full_scores_list if isinstance(e, dict) and 'emotion' in e and 'score' in e}
+
+            logger.info(f"CONSISTENCY_DEBUG: Facial Full Scores: {facial_full_scores_dict}")
+            logger.info(f"CONSISTENCY_DEBUG: Audio Full Scores (List from shared_state): {audio_full_scores_list}")
+            logger.info(f"CONSISTENCY_DEBUG: Audio Scores (Dict for vectorization): {audio_scores_dict}")
+
+            facial_unified_vector = create_unified_emotion_vector(facial_full_scores_dict, FACIAL_TO_UNIFIED)
+            audio_unified_vector = create_unified_emotion_vector(audio_scores_dict, SER_TO_UNIFIED)
+            
+            logger.info(f"CONSISTENCY_DEBUG: Facial Unified Vector: {facial_unified_vector}")
+            logger.info(f"CONSISTENCY_DEBUG: Audio Unified Vector: {audio_unified_vector}")
+            
+            calculated_cosine_similarity = calculate_cosine_similarity(facial_unified_vector, audio_unified_vector)
+            
+            logger.info(f"CONSISTENCY_DEBUG: Calculated Cosine Similarity: {calculated_cosine_similarity}")
+
             # Share the current emotional state via the queue and file
             # Always share data, regardless of latest, to ensure transcriptions are sent
             
@@ -1317,9 +1436,13 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                 "text_emotion": shared_state['text_emotion'],
                 "audio_emotion": shared_state['audio_emotion'],
                 "transcribed_text": shared_state['transcribed_text'],
-                "consistency_level": "Moderate",
-                "cosine_similarity": 0.5  # Placeholder
+                "overall_emotion": shared_state['overall_emotion'],
+                "cosine_similarity": calculated_cosine_similarity,  # REPLACED Placeholder
+                "facial_emotion_full_scores": shared_state['facial_emotion_full_scores'],
+                "audio_emotion_full_scores": shared_state['audio_emotion_full_scores'],
+                "update_id": f"update_{time.time()}" 
             }
+            logger.info(f"CONSISTENCY_DEBUG: Data for JSON/Queue (cosine_similarity): {result_data.get('cosine_similarity')}")
             
             # Add timestamps to transcriptions to ensure they update in UI
             if shared_state['transcribed_text']:
@@ -1500,12 +1623,12 @@ def test_single_audio_transcription(duration=7, model_name="base.en"):
     
     # We will not delete the file automatically so you can inspect it.
     # If you want to delete it, uncomment the lines below:
-    # try:
-    #     logger.info(f"Deleting temporary audio file: {temp_wav_path}")
-    #     if os.path.exists(temp_wav_path):
-    #         os.remove(temp_wav_path)
-    # except Exception as e:
-    #     logger.error(f"Could not delete temporary file {temp_wav_path}: {e}")
+    try:
+        logger.info(f"Deleting temporary audio file: {temp_wav_path}")
+        if os.path.exists(temp_wav_path):
+            os.remove(temp_wav_path)
+    except Exception as e:
+        logger.error(f"Could not delete temporary file {temp_wav_path}: {e}")
     
     logger.info("=== Single Audio Transcription Test Finished ===")
     return temp_wav_path, transcription

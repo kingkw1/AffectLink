@@ -18,14 +18,29 @@ import os
 import sys
 import subprocess
 import time
+import tempfile # Added import
+from camera_utils import find_available_camera
+import sounddevice as sd
+
+def clear_affectlink_json_files():
+    """Deletes stale AffectLink JSON and image files from the temp directory."""
+    files_to_delete = ["affectlink_emotion.json", "affectlink_frame.jpg"]
+    temp_dir = tempfile.gettempdir()
+    for filename in files_to_delete:
+        file_path = os.path.join(temp_dir, filename)
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"🧹 Pre-cleaned old file: {file_path}")
+            # else:
+                # print(f"No pre-existing file to clean: {file_path}") # Optional: log if not found
+        except Exception as e:
+            print(f"⚠️ Error pre-cleaning file {file_path}: {e}")
 
 def check_webcam():
     """Check if webcam is available"""
     print("Checking webcam availability...")
     try:
-        # Import the camera utilities module
-        from camera_utils import find_available_camera
-        
         camera_idx, backend, cap = find_available_camera()
         
         if cap is not None:
@@ -43,7 +58,6 @@ def check_microphone():
     """Check if microphone is available"""
     print("Checking microphone availability...")
     try:
-        import sounddevice as sd
         devices = sd.query_devices()
         default_input = sd.query_devices(kind='input')
         
@@ -60,6 +74,9 @@ def check_microphone():
 def main():
     """Run the real-time AffectLink system"""
     print("\n=== AffectLink Real-time Processing Mode ===")
+    
+    # Clean stale JSON and image files BEFORE starting any processing or subprocesses
+    clear_affectlink_json_files()
     
     # Check for required devices
     has_webcam, webcam_idx, webcam_backend = check_webcam()

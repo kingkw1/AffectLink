@@ -532,8 +532,22 @@ def update_metrics():
     else:
         # Update consistency metric
         try:
-            cosine_similarity = latest_data.get("cosine_similarity", 0.0)
+            # Ensure cosine_similarity is treated as a float
+            cosine_similarity_raw = latest_data.get("cosine_similarity", 0.0)
+            if isinstance(cosine_similarity_raw, (int, float)):
+                cosine_similarity = float(cosine_similarity_raw)
+            else:
+                # Attempt to convert if it's a string representation of a float
+                try:
+                    cosine_similarity = float(str(cosine_similarity_raw))
+                except ValueError:
+                    cosine_similarity = 0.0 # Default if conversion fails
+            
             consistency_level = get_consistency_level(cosine_similarity)
+            
+            # Debug log to check values
+            # print(f"DASH_DEBUG: Cosine Sim Raw: {cosine_similarity_raw}, Parsed: {cosine_similarity}, Level: {consistency_level}")
+
             if consistency_container: # Ensure container exists
                 consistency_container.metric(
                     "Facial/Audio Consistency", 
@@ -541,6 +555,7 @@ def update_metrics():
                 )
         except Exception as e:
             # st.warning(f"Debug: Error updating consistency metric: {e}")
+            print(f"DASH_DEBUG: Error updating consistency metric: {e}, latest_data: {latest_data.get('cosine_similarity')}")
             pass
 
 # Define shared data receiver thread
