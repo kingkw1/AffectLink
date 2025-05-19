@@ -962,16 +962,36 @@ def process_video():
                                       silent=True)
             
             if analysis and len(analysis) > 0:
-                emotions = analysis[0]['emotion']
-                raw_facial_emotion = analysis[0]['dominant_emotion'] # Renamed to raw_facial_emotion
-                confidence = emotions[raw_facial_emotion] / 100
+                emotions = analysis[0]['emotion'] # This is a dict like {'angry': 0.1, 'happy': 75.5, ...}
                 
-                # Map raw facial emotion to unified emotion
-                unified_facial_emotion = FACIAL_TO_UNIFIED.get(raw_facial_emotion, "unknown")
+                # New logic to select dominant unified emotion
+                candidate_emotions = []
+                # Iterate through all detected emotions and their scores
+                for emotion_name, score in emotions.items():
+                    # Map to a unified emotion category (e.g., 'happy', 'sad', 'neutral', 'angry')
+                    # FACIAL_TO_UNIFIED maps raw emotion names to unified ones, or None if not applicable
+                    unified_emotion_mapping = FACIAL_TO_UNIFIED.get(emotion_name)
+                    
+                    # Only consider emotions that have a valid mapping to one of the UNIFIED_EMOTIONS
+                    if unified_emotion_mapping is not None: 
+                        candidate_emotions.append({'name': unified_emotion_mapping, 'score': score})
                 
-                # Store the unified emotion
-                shared_state['facial_emotion'] = (unified_facial_emotion, confidence)
-                logger.info(f"Facial emotion: {unified_facial_emotion} ({confidence:.2f})") # Added log
+                if candidate_emotions:
+                    # If we have candidates, sort them by score in descending order
+                    sorted_candidates = sorted(candidate_emotions, key=lambda x: x['score'], reverse=True)
+                    # The dominant unified emotion is the one with the highest score
+                    dominant_unified_emotion = sorted_candidates[0]['name']
+                    # Confidence is the score of this dominant emotion (0.0 to 100.0), converted to 0.0-1.0
+                    confidence = sorted_candidates[0]['score'] / 100.0
+                else:
+                    # Fallback if no detected emotions map to a valid unified one.
+                    # Defaulting to 'neutral' from UNIFIED_EMOTIONS is a sensible choice.
+                    dominant_unified_emotion = "neutral" 
+                    confidence = 0.0
+
+                # Store the determined unified facial emotion and its confidence
+                shared_state['facial_emotion'] = (dominant_unified_emotion, confidence)
+                logger.info(f"Facial emotion: {dominant_unified_emotion} ({confidence:.2f})") # Added log
         except Exception as e:
             logger.error(f"Error in facial emotion detection: {e}")
             # Continue processing even if facial detection fails
