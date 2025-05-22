@@ -23,7 +23,7 @@ import logging
 import threading
 import numpy as np
 
-from app.constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS
+from constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS
 from audio_emotion_processor import audio_processing_loop, record_audio
 from video_emotion_processor import process_video
 
@@ -223,7 +223,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     
     # Start audio recording thread first (collects audio data)
     print("Starting audio recording thread...")
-    audio_thread = threading.Thread(target=record_audio)
+    audio_thread = threading.Thread(target=record_audio, args=(shared_state,))
     audio_thread.daemon = True
     audio_thread.start()
     
@@ -231,7 +231,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     time.sleep(1)
     
     # Create audio analysis data structures
-    audio_emotion_log = []
+    # audio_emotion_log = [] # Removed, now part of shared_state
     audio_lock = threading.Lock()
     
     # Start audio processing thread with error handling
@@ -239,10 +239,10 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     try:
         audio_processing_thread = threading.Thread(
             target=audio_processing_loop,
-            args=(audio_emotion_log, audio_lock, shared_state['stop_event'], 
+            args=(shared_state, audio_lock, 
                   model, text_classifier, 
                   audio_classifier, audio_feature_extractor, 
-                  device, video_started_event) # REMOVED list(SER_TO_UNIFIED.keys())
+                  device, video_started_event)
         )
         audio_processing_thread.daemon = True
         audio_processing_thread.start()
@@ -255,7 +255,8 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
 
     # Start video processing thread
     print("Starting video processing thread...")
-    video_thread = threading.Thread(target=process_video)
+    video_lock = threading.Lock() # Create a lock for video processing
+    video_thread = threading.Thread(target=process_video, args=(shared_state, video_lock, video_started_event))
     video_thread.daemon = True
     video_thread.start()
     

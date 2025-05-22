@@ -10,9 +10,13 @@ import traceback
 import librosa
 import torch
 import tempfile
+import logging  # Added for local logger
 
-from app.constants import SER_TO_UNIFIED, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
-from main_processor import logger, shared_state
+from constants import SER_TO_UNIFIED, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
+# Removed: from main_processor import logger, shared_state
+
+# Local logger for this module
+logger = logging.getLogger(__name__)
 
 
 def transcribe_audio_whisper(audio_path, whisper_model):
@@ -253,18 +257,15 @@ def moving_average(scores):
 
 
 # Emotion categories for unified mapping
-def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_model, classifier, ser_model, ser_processor, device, video_started_event): # REMOVED ser_label_mapping
+def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, ser_model, ser_processor, device, video_started_event):
     """Process audio for speech-to-text and emotion analysis"""
-    # Add debug logging to track thread execution
-    global audio_buffer, shared_state  # Declare global at top of function
+    global audio_buffer  # Only audio_buffer is global now
     logger.info("Audio processing thread started")
 
-    # Add a timestamp to track how long we've had the same transcription
     last_transcription_change_time = time.time()
     last_transcription = ""
 
     try:
-        # Wait for video processing to start
         logger.info("Waiting for video processing to start...")
         video_started_event.wait()
         logger.info("Video processing started, beginning audio processing")
@@ -276,7 +277,8 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
         audio_emotion_window = deque(maxlen=smoothing_window)
         audio_score_window = deque(maxlen=smoothing_window)
 
-        while not (isinstance(stop_flag, dict) and stop_flag.get('stop', False)) and not (hasattr(stop_flag, 'is_set') and stop_flag.is_set()):
+        stop_event_obj = shared_state.get('stop_event')
+        while not (isinstance(stop_event_obj, dict) and stop_event_obj.get('stop', False)) and not (hasattr(stop_event_obj, 'is_set') and stop_event_obj.is_set()):
             try:
                 # Initialize variables at the start of each loop iteration
                 unified_text_emotion = "unknown"
@@ -384,22 +386,26 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     logger.warning("No transcription generated - will try again with fresh audio")
 
                 # Get all text emotion scores
-                text_emotion_scores_raw = classifier(text) # This is text_classifier
-                if text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
-                    # Get unified text scores
-                    unified_text_scores = _create_and_normalize_unified_scores(
-                        text_emotion_scores_raw, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
-                    )
-                    shared_state['text_emotion_history'].append({
-                        'timestamp': time.time(),
-                        'scores': unified_text_scores # Corrected variable name
-                    })
+                # Ensure text is valid before calling the text classifier
+                if text and text.strip() and text.strip() != PLACEHOLDER_TEXT:
+                    text_emotion_scores_raw = classifier(text) # This is text_classifier
+                    if text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
+                        # Get unified text scores
+                        unified_text_scores = _create_and_normalize_unified_scores(
+                            text_emotion_scores_raw, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
+                        )
+                        shared_state['text_emotion_history'].append({
+                            'timestamp': time.time(),
+                            'scores': unified_text_scores # Corrected variable name
+                        })
 
-                    # Determine dominant text emotion from unified scores for current display
-                    if unified_text_scores:
-                        dominant_text_emotion = max(unified_text_scores, key=unified_text_scores.get)
-                        confidence = unified_text_scores[dominant_text_emotion]
-                        shared_state['text_emotion'] = (dominant_text_emotion, confidence)
+                        # Determine dominant text emotion from unified scores for current display
+                        if unified_text_scores:
+                            dominant_text_emotion = max(unified_text_scores, key=unified_text_scores.get)
+                            confidence = unified_text_scores[dominant_text_emotion]
+                            shared_state['text_emotion'] = (dominant_text_emotion, confidence)
+                        else:
+                            shared_state['text_emotion'] = ("unknown", 0.0)
                     else:
                         shared_state['text_emotion'] = ("unknown", 0.0)
                 else:
@@ -463,8 +469,11 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                             'confidence': smoothed_score,
                             'emotion_scores': unified_text_scores # Corrected variable name
                         }
-                        with audio_lock:
-                            audio_emotion_log.append(log_entry_text)
+                        # Append to shared_state['text_emotion_history'] instead of audio_emotion_log
+                        if 'text_emotion_history' in shared_state and hasattr(shared_state['text_emotion_history'], 'append'):
+                            shared_state['text_emotion_history'].append(log_entry_text)
+                        else:
+                            logger.warning("shared_state['text_emotion_history'] is not available or not a deque.")
                     except Exception as e:
                         logger.error(f"Error in text emotion smoothing: {e}")
 
@@ -477,14 +486,17 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         smoothed_audio_emotion = max(set(audio_emotion_window), key=audio_emotion_window.count)
                         smoothed_audio_score = moving_average([s for e, s in zip(audio_emotion_window, audio_score_window) if e == smoothed_audio_emotion])
 
-                        with audio_lock:
-                            audio_emotion_log.append({
+                        # Append to shared_state['ser_emotion_history'] instead of audio_emotion_log
+                        if 'ser_emotion_history' in shared_state and hasattr(shared_state['ser_emotion_history'], 'append'):
+                            shared_state['ser_emotion_history'].append({
                                 'timestamp': time.time(),
                                 'modality': 'audio',
                                 'emotion': smoothed_audio_emotion,
                                 'confidence': smoothed_audio_score,
-                                'emotion_scores': None  # We're not returning full scores here
+                                'emotion_scores': None
                             })
+                        else:
+                            logger.warning("shared_state['ser_emotion_history'] is not available or not a deque.")
                     except Exception as e:
                         logger.error(f"Error in audio emotion smoothing: {e}")
 
@@ -494,8 +506,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
             except Exception as e:
                 logger.error(f"Error in audio processing loop: {e}")
                 logger.error(traceback.format_exc())
-                time.sleep(1)  # Avoid tight loop on errors
-
+                time.sleep(1)
     except Exception as e:
         logger.error(f"Fatal error in audio processing thread: {e}")
         logger.error(traceback.format_exc())
@@ -503,9 +514,9 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
         logger.info("Audio processing thread stopped")
 
 
-def record_audio():
+def record_audio(shared_state):
     """Record audio continuously and store in shared state"""
-    global shared_state, audio_buffer
+    global audio_buffer
 
     # Track audio stats
     audio_level_tracker = deque(maxlen=20)  # Track last 20 audio chunks
@@ -602,12 +613,12 @@ def record_audio():
 
             # Keep recording until stop flag is set
             while True:
-                # Check for stop signal
-                if isinstance(shared_state['stop_event'], dict):
-                    if shared_state['stop_event'].get('stop', False):
+                stop_event_obj = shared_state.get('stop_event')
+                if isinstance(stop_event_obj, dict):
+                    if stop_event_obj.get('stop', False):
                         logger.info("Stop signal received in audio recording")
                         break
-                elif shared_state['stop_event'] and shared_state['stop_event']:
+                elif stop_event_obj and stop_event_obj:
                     logger.info("Stop event detected in audio recording")
                     break
 
