@@ -299,7 +299,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                 print(f"Text emotion: {text_emotion} ({text_score:.2f}) - '{shared_state['transcribed_text'][:30]}...'")
             
             # --- Calculate Facial/Audio Consistency ---
-            logger.info("HARDCODED_TEST_LOG: Inside consistency block") # ADDED FOR DEBUGGING
+            # logger.info("HARDCODED_TEST_LOG: Inside consistency block") # ADDED FOR DEBUGGING
             facial_full_scores_dict = shared_state.get('facial_emotion_full_scores', {})
             audio_full_scores_list = shared_state.get('audio_emotion_full_scores', [])
 
@@ -341,7 +341,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                 "ser_emotion_history": list(shared_state['ser_emotion_history']),
                 "update_id": f"update_{time.time()}" 
             }
-            logger.info(f"CONSISTENCY_DEBUG: Data for JSON/Queue (cosine_similarity): {result_data.get('cosine_similarity')}")
+            # logger.info(f"CONSISTENCY_DEBUG: Data for JSON/Queue (cosine_similarity): {result_data.get('cosine_similarity')}")
             
             # Add timestamps to transcriptions to ensure they update in UI
             if transcribed_text_to_send:

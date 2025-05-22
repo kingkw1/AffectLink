@@ -120,15 +120,26 @@ def main():
                 print("❌ AffectLink process has terminated unexpectedly.")
                 break
     except KeyboardInterrupt:
-        print("\n⏹️ Keyboard interrupt received. Shutting down AffectLink...")
-        process.terminate()
-        time.sleep(1)
-        if process.poll() is None:
-            # Force kill if needed
-            print("Forcing process termination...")
-            process.kill()
+        print("\\n⏹️ Keyboard interrupt received in start_realtime.py. Signaling AffectLink process to shut down...")
+        if process.poll() is None: # If subprocess is still running
+            print("Sending terminate signal to AffectLink process...")
+            process.terminate() # Ask it to terminate (SIGTERM)
+            try:
+                print("Waiting for AffectLink process to terminate (max 5 seconds)...")
+                process.wait(timeout=5) # Give it 5 seconds to terminate gracefully
+                print("AffectLink process terminated.")
+            except subprocess.TimeoutExpired:
+                print('AffectLink process did not terminate in time, forcing kill...')
+                process.kill()
+                print('AffectLink process killed.')
+            except KeyboardInterrupt: # If Ctrl+C is pressed AGAIN during wait
+                print('Further interrupt during shutdown. Forcing kill...')
+                if process.poll() is None:
+                    process.kill()
+        else:
+            print("AffectLink process was already terminated.")
     
-    print("✅ AffectLink shutdown complete.")
+    print("✅ AffectLink shutdown sequence in start_realtime.py complete.")
 
 if __name__ == "__main__":
     main()
