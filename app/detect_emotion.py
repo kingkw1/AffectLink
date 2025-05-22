@@ -397,91 +397,74 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                 # Transcribe audio to text
                 logger.debug("Transcribing audio...")
                 text = transcribe_audio_whisper(temp_wav, whisper_model)
-                
+
+                # Handle transcription results and buffer resets
+                PLACEHOLDER_TEXT = "Waiting for audio transcription..."
                 if text == "RESET_BUFFER":
                     logger.warning("Whisper requested buffer reset. Clearing audio buffer.")
                     with audio_lock:
                         audio_buffer.clear()
                         shared_state['latest_audio'] = None
-                        shared_state['transcribed_text'] = "" # Clear current transcription
-                        shared_state['audio_reset_time'] = time.time() # Signal update
-                    # Reset periodic reset counter
+                        # Only set placeholder if current is not a fresh, valid transcription
+                        if shared_state['transcribed_text'] == PLACEHOLDER_TEXT or not shared_state['transcribed_text'].strip():
+                            shared_state['transcribed_text'] = PLACEHOLDER_TEXT
+                        shared_state['audio_reset_time'] = time.time()  # Signal update
                     if hasattr(audio_processing_loop, 'buffer_reset_count'):
                         audio_processing_loop.buffer_reset_count = 0
-                    # Clear last texts history to prevent other resets from misfiring
                     if hasattr(audio_processing_loop, 'last_texts'):
                         audio_processing_loop.last_texts = []
-                    time.sleep(0.5) # Brief pause after reset
-                    continue # Skip the rest of this iteration
+                    time.sleep(0.5)  # Brief pause after reset
+                    continue  # Skip the rest of this iteration
+                elif text and text.strip() and text.strip() != PLACEHOLDER_TEXT:
+                    shared_state['transcribed_text'] = text
+                # If text is None, empty, or the placeholder, do NOT update shared_state['transcribed_text']
+                # This preserves the last real transcription.
 
                 # Use a simple counter for buffer management
-                # Initialize buffer reset counter if it doesn't exist yet
                 if not hasattr(audio_processing_loop, 'buffer_reset_count'):
                     audio_processing_loop.buffer_reset_count = 0
-                
-                # Increment the counter
                 audio_processing_loop.buffer_reset_count += 1
-                
-                # More aggressive buffer management - reset more frequently
-                if audio_processing_loop.buffer_reset_count >= 5:  # Changed from 2 to 5
+
+                # Periodic buffer management - reset more frequently
+                # This should ideally happen BEFORE transcription of the current chunk if it's based on staleness
+                # For now, ensure it doesn't overwrite a fresh transcription from THIS iteration.
+                if audio_processing_loop.buffer_reset_count >= 5:
                     logger.info("Periodically clearing audio buffer to ensure fresh audio")
-                    # audio_buffer already declared as global at top of function
                     with audio_lock:
                         audio_buffer.clear()
-                        # Also clear the shared state cache to force new processing
                         shared_state['latest_audio'] = None
-                        shared_state['transcribed_text'] = ""
-                        # Add a timestamp to force dashboard recognition of a new update
+                        # Only set placeholder if the current text isn't the one we just got
+                        if not (text and text.strip() and text.strip() != PLACEHOLDER_TEXT):
+                            shared_state['transcribed_text'] = PLACEHOLDER_TEXT
                         shared_state['audio_reset_time'] = time.time()
-                    
-                    # Force more variation in reset timing to break potential loops
                     random_sleep = random.uniform(0.2, 0.7)
                     time.sleep(random_sleep)
-
-                    # Reset counter
                     audio_processing_loop.buffer_reset_count = 0
-                    
-                    # Log with more detail
                     logger.warning(f"Audio buffer reset performed at {time.time():.3f} with {random_sleep:.3f}s sleep")
-                
+
                 # Track the last few transcriptions to detect if we're stuck in a loop
                 if not hasattr(audio_processing_loop, 'last_texts'):
                     audio_processing_loop.last_texts = []
                     audio_processing_loop.no_new_text_counter = 0
-                
-                if text:
+
+                if text and text.strip() and text.strip() != PLACEHOLDER_TEXT:
                     logger.info(f"Transcribed text: {text[:50]}...")
-                    
-                    # Add timestamp to the text to help identify if it's actually new
                     text_with_timestamp = f"{text} [ts:{time.time():.2f}]"
-                    
-                    # Store this transcription for repeat detection
                     audio_processing_loop.last_texts.append(text)
                     if len(audio_processing_loop.last_texts) > 5:
                         audio_processing_loop.last_texts.pop(0)
-                    
-                    # If we have the same text at all, be much more aggressive about resetting
-                    # We only need 2 repeat detections to trigger a reset now
                     if len(audio_processing_loop.last_texts) >= 2:
-                        # Only compare the actual text without timestamps
                         if audio_processing_loop.last_texts[-1] == audio_processing_loop.last_texts[-2]:
                             logger.warning(f"Detected same transcription twice in a row - force clearing buffer: '{text}'")
-                            # Clear the buffer (audio_buffer already declared as global at top of function)
                             with audio_lock:
                                 audio_buffer.clear()
-                                # Also clear shared state to force new processing
                                 shared_state['latest_audio'] = None
-                                # Update with timestamped text to force a change
-                                shared_state['transcribed_text'] = text_with_timestamp
-                            
-                            # Force random sleep to introduce variability
+                                shared_state['transcribed_text'] = PLACEHOLDER_TEXT  # Explicit placeholder
                             random_sleep = random.uniform(0.1, 0.5)
                             time.sleep(random_sleep)
-
-                            # Also clear the tracking history and reset counter to trigger faster reset
                             audio_processing_loop.last_texts = []
                             audio_processing_loop.buffer_reset_count = 0
-                else:
+                elif not text or not text.strip():
                     logger.warning("No transcription generated - will try again with fresh audio")
 
                 # Get all text emotion scores
@@ -562,7 +545,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                             'modality': 'text',
                             'emotion': smoothed_emotion,
                             'confidence': smoothed_score,
-                            'emotion_scores': text_emotion_scores
+                            'emotion_scores': unified_text_scores # Corrected variable name
                         }
                         with audio_lock:
                             audio_emotion_log.append(log_entry_text)
@@ -590,7 +573,7 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                         logger.error(f"Error in audio emotion smoothing: {e}")
                 
                 # Sleep to avoid high CPU usage
-                time.sleep(1)
+                time.sleep(0.2) # Reduced sleep time
                 
             except Exception as e:
                 logger.error(f"Error in audio processing loop: {e}")
@@ -1174,26 +1157,33 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
             
             logger.info(f"CONSISTENCY_DEBUG: Calculated Cosine Similarity: {calculated_cosine_similarity}")
 
-            # Share the current emotional state via the queue and file
-            # Always share data, regardless of latest, to ensure transcriptions are sent
-            
             # Combine all current emotional data
+            PLACEHOLDER_TEXT = "Waiting for audio transcription..."
+            transcribed_text_to_send = shared_state['transcribed_text']
+            if transcribed_text_to_send == PLACEHOLDER_TEXT:
+                transcribed_text_to_send = ""  # Do not send placeholder to UI/queue
+
             result_data = {
                 "facial_emotion": shared_state['facial_emotion'],
                 "text_emotion": shared_state['text_emotion'],
                 "audio_emotion": shared_state['audio_emotion'],
-                "transcribed_text": shared_state['transcribed_text'],
+                "transcribed_text": transcribed_text_to_send,
                 "overall_emotion": shared_state['overall_emotion'],
-                "cosine_similarity": calculated_cosine_similarity,  # REPLACED Placeholder
+                "cosine_similarity": calculated_cosine_similarity,
                 "facial_emotion_full_scores": shared_state['facial_emotion_full_scores'],
                 "audio_emotion_full_scores": shared_state['audio_emotion_full_scores'],
+                "facial_emotion_history": list(shared_state['facial_emotion_history']),
+                "text_emotion_history": list(shared_state['text_emotion_history']),
+                "ser_emotion_history": list(shared_state['ser_emotion_history']),
                 "update_id": f"update_{time.time()}" 
             }
             logger.info(f"CONSISTENCY_DEBUG: Data for JSON/Queue (cosine_similarity): {result_data.get('cosine_similarity')}")
             
             # Add timestamps to transcriptions to ensure they update in UI
-            if shared_state['transcribed_text']:
-                result_data["transcribed_text"] = f"{shared_state['transcribed_text']} [{time.time():.3f}]"
+            if transcribed_text_to_send:
+                result_data["transcribed_text"] = f"{transcribed_text_to_send} [{time.time():.3f}]"
+            else:
+                result_data["transcribed_text"] = ""
             
             # First try sending via queue if available
             if shared_state['emotion_queue'] is not None:
