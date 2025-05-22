@@ -315,6 +315,7 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, s
                 # Transcribe audio to text
                 logger.debug("Transcribing audio...")
                 text = transcribe_audio_whisper(temp_wav, whisper_model)
+                logger.info(f"Whisper output: '{text}'") # Added log
 
                 # Handle transcription results and buffer resets
                 PLACEHOLDER_TEXT = "Waiting for audio transcription..."
@@ -388,28 +389,50 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, s
                 # Get all text emotion scores
                 # Ensure text is valid before calling the text classifier
                 if text and text.strip() and text.strip() != PLACEHOLDER_TEXT:
+                    logger.info(f"Attempting text emotion classification for: '{text[:100]}'")
                     text_emotion_scores_raw = classifier(text) # This is text_classifier
-                    if text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
+                    logger.info(f"Raw text emotion scores: {text_emotion_scores_raw}")
+                    # Check if the raw scores are in the expected format [[{...}]]
+                    if text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and \
+                       len(text_emotion_scores_raw) > 0 and isinstance(text_emotion_scores_raw[0], list) and \
+                       len(text_emotion_scores_raw[0]) > 0:
+                        
+                        actual_scores_to_process = text_emotion_scores_raw[0] # Extract the inner list
+                        
                         # Get unified text scores
                         unified_text_scores = _create_and_normalize_unified_scores(
-                            text_emotion_scores_raw, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
+                            actual_scores_to_process, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
                         )
+                        logger.info(f"Unified text scores: {unified_text_scores}") # Log unified scores
+
                         shared_state['text_emotion_history'].append({
                             'timestamp': time.time(),
-                            'scores': unified_text_scores # Corrected variable name
+                            'scores': unified_text_scores
                         })
 
                         # Determine dominant text emotion from unified scores for current display
-                        if unified_text_scores:
+                        if unified_text_scores and any(s > 0 for s in unified_text_scores.values()): # Check for any positive score
                             dominant_text_emotion = max(unified_text_scores, key=unified_text_scores.get)
                             confidence = unified_text_scores[dominant_text_emotion]
                             shared_state['text_emotion'] = (dominant_text_emotion, confidence)
+                            logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({dominant_text_emotion}, {confidence:.2f})") # Log update
+                            unified_text_emotion = dominant_text_emotion # Update for smoothing
+                            text_score = confidence                 # Update for smoothing
                         else:
+                            logger.warning(f"Unified text scores are empty, all zero, or invalid after normalization: {unified_text_scores}")
                             shared_state['text_emotion'] = ("unknown", 0.0)
+                            unified_text_emotion = "unknown" 
+                            text_score = 0.0                 
                     else:
+                        logger.warning(f"Text classifier returned no valid scores or unexpected format: {text_emotion_scores_raw}")
                         shared_state['text_emotion'] = ("unknown", 0.0)
+                        unified_text_emotion = "unknown" 
+                        text_score = 0.0                 
                 else:
+                    logger.warning(f"Skipping text emotion classification because text is invalid or placeholder: '{text}'")
                     shared_state['text_emotion'] = ("unknown", 0.0)
+                    unified_text_emotion = "unknown" 
+                    text_score = 0.0                 
 
                 # Get audio emotion scores - using improved function
                 logger.debug("Analyzing audio emotion...")

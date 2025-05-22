@@ -307,19 +307,19 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
             # Expected format for audio_full_scores_list: [{'emotion': 'neu', 'score': 0.7}, ...]
             audio_scores_dict = {e['emotion']: e['score'] for e in audio_full_scores_list if isinstance(e, dict) and 'emotion' in e and 'score' in e}
 
-            logger.info(f"CONSISTENCY_DEBUG: Facial Full Scores: {facial_full_scores_dict}")
-            logger.info(f"CONSISTENCY_DEBUG: Audio Full Scores (List from shared_state): {audio_full_scores_list}")
-            logger.info(f"CONSISTENCY_DEBUG: Audio Scores (Dict for vectorization): {audio_scores_dict}")
+            # logger.info(f"CONSISTENCY_DEBUG: Facial Full Scores: {facial_full_scores_dict}")
+            # logger.info(f"CONSISTENCY_DEBUG: Audio Full Scores (List from shared_state): {audio_full_scores_list}")
+            # logger.info(f"CONSISTENCY_DEBUG: Audio Scores (Dict for vectorization): {audio_scores_dict}")
 
             facial_unified_vector = create_unified_emotion_vector(facial_full_scores_dict, FACIAL_TO_UNIFIED)
             audio_unified_vector = create_unified_emotion_vector(audio_scores_dict, SER_TO_UNIFIED)
             
-            logger.info(f"CONSISTENCY_DEBUG: Facial Unified Vector: {facial_unified_vector}")
-            logger.info(f"CONSISTENCY_DEBUG: Audio Unified Vector: {audio_unified_vector}")
+            # logger.info(f"CONSISTENCY_DEBUG: Facial Unified Vector: {facial_unified_vector}")
+            # logger.info(f"CONSISTENCY_DEBUG: Audio Unified Vector: {audio_unified_vector}")
             
             calculated_cosine_similarity = calculate_cosine_similarity(facial_unified_vector, audio_unified_vector)
             
-            logger.info(f"CONSISTENCY_DEBUG: Calculated Cosine Similarity: {calculated_cosine_similarity}")
+            # logger.info(f"CONSISTENCY_DEBUG: Calculated Cosine Similarity: {calculated_cosine_similarity}")
 
             # Combine all current emotional data
             PLACEHOLDER_TEXT = "Waiting for audio transcription..."
