@@ -13,7 +13,8 @@ project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from app.detect_emotion import logger, transcribe_audio_whisper
+from app.audio_emotion_processor import transcribe_audio_whisper
+from app.main_processor import logger
 
 
 def test_single_audio_transcription(duration=7, model_name="base.en"):

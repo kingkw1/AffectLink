@@ -18,6 +18,7 @@ if current_dir not in sys.path:
     sys.path.append(current_dir)
 
 # Import our camera utility
+import main_processor
 from camera_utils import find_available_camera
 
 # Global variables
@@ -29,7 +30,6 @@ def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
     """Run the emotion detection process with queue for IPC"""
     try:
         # Import the emotion detection module
-        import detect_emotion
         print("Using detect_emotion module")
             
         # Get camera index from environment if available
@@ -55,7 +55,7 @@ def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
         stop_monitor.start()
         
         # Run the main function with the queue, our stop dict, and camera index
-        detect_emotion.main(
+        main_processor.main(
             emotion_queue=emotion_queue,
             stop_event=shared_stop_dict,  # Pass the dict instead of the Event
             camera_index=camera_index
