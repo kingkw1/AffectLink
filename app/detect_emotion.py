@@ -7,11 +7,10 @@ It handles device detection and initialization.
 Usage:
     python run_app.py
 """
-
+import time # Added for timestamps
+from collections import deque
 import os
 import tempfile
-from collections import deque
-import time
 import math
 import hashlib
 import random
@@ -76,6 +75,45 @@ FACIAL_TO_UNIFIED = {
 # ---------------------------
 # Helper functions
 # ---------------------------
+
+def _create_and_normalize_unified_scores(raw_scores_input, mapping_dict, target_emotions):
+    """
+    Create a dictionary of scores in the unified emotion space, normalized to 1.0.
+    raw_scores_input can be:
+        - a dict (e.g., from DeepFace: {'neutral': 0.9, ...})
+        - a list of dicts (e.g., from text/SER classifiers: [{'label': 'joy', 'score': 0.9}, ...])
+    mapping_dict maps raw emotion labels to unified labels.
+    target_emotions is a list of the unified emotion labels we care about.
+    """
+    unified_scores = {emotion: 0.0 for emotion in target_emotions}
+    
+    processed_scores = {} # Intermediate dict to sum scores for raw labels before mapping
+
+    if isinstance(raw_scores_input, dict):
+        processed_scores = raw_scores_input
+    elif isinstance(raw_scores_input, list):
+        for item in raw_scores_input:
+            label_key = 'label' if 'label' in item else 'emotion' # text uses 'label', SER uses 'emotion'
+            if label_key in item: # Ensure the key exists
+                emotion_name = item[label_key]
+                score = item.get('score', 0.0)
+                processed_scores[emotion_name] = processed_scores.get(emotion_name, 0.0) + score
+
+    # Map to unified emotions
+    for raw_emotion, score in processed_scores.items():
+        unified_emotion_category = mapping_dict.get(raw_emotion)
+        if unified_emotion_category in unified_scores: # Only consider emotions that map to one of the target_emotions
+            unified_scores[unified_emotion_category] += score
+            
+    # Normalize the unified_scores
+    total_unified_score = sum(unified_scores.values())
+    if total_unified_score > 0:
+        for emotion in unified_scores:
+            unified_scores[emotion] /= total_unified_score
+    # If total_unified_score is 0, unified_scores will remain all zeros.
+
+    return unified_scores
+
 def transcribe_audio_whisper(audio_path, whisper_model):
     """
     Transcribe audio file using Whisper.
@@ -447,86 +485,27 @@ def audio_processing_loop(audio_emotion_log, audio_lock, stop_flag, whisper_mode
                     logger.warning("No transcription generated - will try again with fresh audio")
 
                 # Get all text emotion scores
-                text_emotion_scores_raw = classifier(text, top_k=None) if text else [] 
+                text_emotion_scores_raw = classifier(text) # This is text_classifier
+                if text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
+                    # Get unified text scores
+                    unified_text_scores = _create_and_normalize_unified_scores(
+                        text_emotion_scores_raw, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
+                    )
+                    shared_state['text_emotion_history'].append({
+                        'timestamp': time.time(),
+                        'scores': unified_text_scores # Corrected variable name
+                    })
 
-                text_emotion_scores = []
-                if text and text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and len(text_emotion_scores_raw) > 0:
-                    # The classifier for "j-hartmann/emotion-english-distilroberta-base" returns a list containing a list of dicts
-                    if isinstance(text_emotion_scores_raw[0], list):
-                        text_emotion_scores = sorted(text_emotion_scores_raw[0], key=lambda x: x['score'], reverse=True)
-                    elif isinstance(text_emotion_scores_raw[0], dict): # Fallback if the structure is flatter
-                        text_emotion_scores = sorted(text_emotion_scores_raw, key=lambda x: x['score'], reverse=True)
-
-                # Get top text emotion
-                text_emotion = None
-                text_score = 0.0
-                if text_emotion_scores:
-                    top_text = text_emotion_scores[0]
-                    raw_text_emotion = top_text['label'] # Renamed to raw_text_emotion
-                    text_score = top_text['score']
-                    
-                    # Map raw text emotion to unified emotion
-                    unified_text_emotion = TEXT_TO_UNIFIED.get(raw_text_emotion, "unknown")
-                    
-                    logger.info(f"Text emotion: {unified_text_emotion} ({text_score:.2f})")
-                    # Update shared state with transcript and unified text emotion
-                    shared_state['transcribed_text'] = text
-                    shared_state['text_emotion'] = (unified_text_emotion, text_score)
-                    logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({unified_text_emotion}, {text_score:.2f})")
-                    
-                    # Check if transcription has changed
-                    if text != last_transcription:
-                        # Log that we got a new transcription 
-                        logger.info(f"New transcription detected: '{text[:30]}...' (previous: '{last_transcription[:20]}...')")
-                        last_transcription = text
-                        last_transcription_change_time = time.time()
-                        
-                        # Initialize or reset a stuck counter
-                        if not hasattr(audio_processing_loop, 'stuck_counter'):
-                            audio_processing_loop.stuck_counter = 0
-                        else:
-                            audio_processing_loop.stuck_counter = 0
+                    # Determine dominant text emotion from unified scores for current display
+                    if unified_text_scores:
+                        dominant_text_emotion = max(unified_text_scores, key=unified_text_scores.get)
+                        confidence = unified_text_scores[dominant_text_emotion]
+                        shared_state['text_emotion'] = (dominant_text_emotion, confidence)
                     else:
-                        # Check if we've been stuck with the same transcription
-                        current_time = time.time()
-                        time_since_change = current_time - last_transcription_change_time
-                        
-                        # Track how long we've been stuck
-                        if not hasattr(audio_processing_loop, 'stuck_counter'):
-                            audio_processing_loop.stuck_counter = 0
-                        audio_processing_loop.stuck_counter += 1
-                        
-                        # More aggressive: reduce the stuck time threshold to 10 seconds
-                        if time_since_change > 10 or audio_processing_loop.stuck_counter >= 3:
-                            logger.warning(f"Stuck on transcription for {time_since_change:.1f}s (count: {audio_processing_loop.stuck_counter}): '{text[:30]}...' - forcing COMPLETE reset")
-                            
-                            # Complete buffer reset
-                            with audio_lock:
-                                # Full reset of all audio-related state
-                                audio_buffer.clear()
-                                shared_state['latest_audio'] = None
-                                shared_state['transcribed_text'] = ""
-                                
-                                # Reset any whisper caches by adding unique flag
-                                if hasattr(transcribe_audio_whisper, 'last_transcription'):
-                                    delattr(transcribe_audio_whisper, 'last_transcription')
-                                if hasattr(transcribe_audio_whisper, 'repeat_count'):
-                                    delattr(transcribe_audio_whisper, 'repeat_count')
-                                    
-                            # Reset tracking variables
-                            last_transcription = ""
-                            last_transcription_change_time = current_time
-                            audio_processing_loop.stuck_counter = 0
-
-                            # Add random delay to help break any patterns
-                            random_sleep = random.uniform(0.3, 0.8)
-                            time.sleep(random_sleep)
-                            logger.info(f"Inserted random delay of {random_sleep:.2f}s after reset")
-
-                            continue  # Skip rest of processing loop
+                        shared_state['text_emotion'] = ("unknown", 0.0)
                 else:
-                    logger.debug("No text emotions detected")
-                
+                    shared_state['text_emotion'] = ("unknown", 0.0)
+
                 # Get audio emotion scores - using improved function
                 logger.debug("Analyzing audio emotion...")
                 try:
@@ -751,17 +730,20 @@ logger = logging.getLogger('detect_emotion')
 
 # Global variables
 shared_state = {
-    'emotion_queue': None,     # Queue for sending emotion data
-    'stop_event': None,        # Event for stopping the process
-    'latest_audio': None,      # Latest audio data
-    'latest_frame': None,      # Latest video frame
-    'transcribed_text': "Waiting for audio transcription...",    # Latest transcribed text - UPDATED
-    'facial_emotion': ("neutral", 0.0),  # Latest facial emotion - UPDATED
-    'audio_emotion': ("neutral", 0.0),   # Latest audio emotion - UPDATED
-    'text_emotion': ("neutral", 0.0),    # Latest text emotion - UPDATED
-    'overall_emotion': "neutral",         # Combined overall emotion
-    'facial_emotion_full_scores': {}, # Dict: {'raw_label': score, ...} - ADDED
-    'audio_emotion_full_scores': [],  # List of dicts: [{'emotion': 'raw_label', 'score': score}, ...] - ADDED
+    'emotion_queue': None,
+    'stop_event': None,
+    'latest_audio': None,
+    'latest_frame': None,
+    'transcribed_text': "Waiting for audio transcription...",
+    'facial_emotion': ("neutral", 0.0),
+    'audio_emotion': ("neutral", 0.0),
+    'text_emotion': ("neutral", 0.0),
+    'overall_emotion': "neutral",
+    'facial_emotion_full_scores': {},
+    'audio_emotion_full_scores': [],
+    'facial_emotion_history': deque(maxlen=60), # Added for historical tracking
+    'text_emotion_history': deque(maxlen=60),   # Added for historical tracking
+    'ser_emotion_history': deque(maxlen=60)     # Added for historical tracking
 }
 
 # Reusable whisper model instance
@@ -855,8 +837,10 @@ def init_webcam(preferred_index=0, try_fallbacks=True):
     return cap
     
 def process_video():
-    """Process video frames from webcam"""
-    global shared_state, face_cascade
+    """Process video frames for facial emotion detection."""
+    global shared_state, face_cascade, video_frame_queue
+    
+    logger.info("Video processing thread started")
     
     # Initialize OpenCV face detector
     if face_cascade is None:
@@ -1006,10 +990,11 @@ def process_video():
     logger.info("Video processing thread exited")
 
 def main(emotion_queue=None, stop_event=None, camera_index=0):
-    """Main function to run the emotion detection system"""
+    """Main function for emotion detection."""
     global shared_state, model, text_classifier, audio_feature_extractor, audio_classifier, face_cascade
+    global ser_model, ser_processor # Ensure these are global if accessed directly
     
-    print("Starting emotion detection system...")
+    logger.info(f"Detect_emotion main started with camera_index: {camera_index}")
     
     # Store the queue and stop event
     shared_state['emotion_queue'] = emotion_queue
