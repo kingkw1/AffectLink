@@ -11,6 +11,8 @@ import os
 import sys
 import subprocess
 import threading
+import tempfile # Added import
+import sounddevice as sd # Added import
 
 # Add the current directory to sys.path to import local modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -26,11 +28,62 @@ stop_event = None
 dashboard_process = None
 detector_process = None
 
+# Moved functions from start_realtime.py
+def clear_affectlink_json_files():
+    """Deletes stale AffectLink JSON and image files from the temp directory."""
+    files_to_delete = ["affectlink_emotion.json", "affectlink_frame.jpg"]
+    temp_dir = tempfile.gettempdir()
+    for filename in files_to_delete:
+        file_path = os.path.join(temp_dir, filename)
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"🧹 Pre-cleaned old file: {file_path}")
+            # else:
+                # print(f"No pre-existing file to clean: {file_path}") # Optional: log if not found
+        except Exception as e:
+            print(f"⚠️ Error pre-cleaning file {file_path}: {e}")
+
+def check_webcam():
+    """Check if webcam is available"""
+    print("Checking webcam availability...")
+    try:
+        # find_available_camera is imported from camera_utils at the top of the file
+        camera_idx, backend, cap = find_available_camera()
+        
+        if cap is not None:
+            print(f"✅ Webcam found: Camera #{camera_idx} with {backend} backend.")
+            cap.release()
+            return True, camera_idx, backend
+        else:
+            print("❌ No webcam detected.")
+            return False, None, None
+    except Exception as e:
+        print(f"❌ Error checking webcam: {e}")
+        return False, None, None
+
+def check_microphone():
+    """Check if microphone is available"""
+    print("Checking microphone availability...")
+    try:
+        devices = sd.query_devices()
+        default_input = sd.query_devices(kind='input')
+        
+        if default_input:
+            print(f"✅ Microphone found: {default_input.get('name', 'Unknown')}")
+            return True, default_input.get('name')
+        else:
+            print("❌ No microphone detected.")
+            return False, None
+    except Exception as e:
+        print(f"❌ Error checking microphone: {e}")
+        return False, None
+
 def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
     """Run the emotion detection process with queue for IPC"""
     try:
         # Import the emotion detection module
-        print("Using detect_emotion module")
+        print("Using main_processor module") # Updated print statement
             
         # Get camera index from environment if available
         camera_index = int(os.environ.get('WEBCAM_INDEX', '0'))
@@ -121,14 +174,32 @@ def main():
     """Main function to run the AffectLink system"""
     global stop_event, dashboard_process, detector_process
     
+    # Call clear_affectlink_json_files at the very beginning
+    clear_affectlink_json_files()
+    
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Test webcam availability before starting processes
-    webcam_available = test_webcam()
-    if not webcam_available:
-        print("Warning: No webcam available. Continuing with audio-only mode.")
+    # Integrated device checks from start_realtime.py
+    print("\n=== AffectLink Real-time Processing Mode ===")
+    print("\n🔄 Starting AffectLink in real-time processing mode...")
+
+    # Check for required devices
+    has_webcam, webcam_idx, webcam_backend = check_webcam()
+    has_microphone, mic_name = check_microphone()
+
+    if not has_webcam and not has_microphone:
+        print("\n❌ ERROR: Neither webcam nor microphone detected.")
+        print("AffectLink requires at least one of these devices to function properly.")
+        input("\nPress Enter to exit...")
+        return # Exit the application
+
+    # Set environment variables based on detected devices
+    if has_webcam:
+        os.environ["WEBCAM_INDEX"] = str(webcam_idx)
+        if webcam_backend == "directshow":
+            os.environ["WEBCAM_BACKEND"] = "directshow"
     
     # Create shared stop event and Manager for IPC queues
     stop_event = multiprocessing.Event()
