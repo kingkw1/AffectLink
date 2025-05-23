@@ -486,16 +486,16 @@ def update_metrics():
 
         # Update Plots
         # Facial Emotion Full Scores Plot
-        facial_scores = latest_data.get("facial_emotion_full_scores", {})
-        if facial_scores and isinstance(facial_scores, dict) and any(facial_scores.values()):
-            # Ensure scores are Python floats
-            facial_scores_py = {k: float(v) for k, v in facial_scores.items()}
-            df_facial = pd.DataFrame(list(facial_scores_py.items()), columns=['Emotion', 'Score']).sort_values(by='Score', ascending=False)
-            fig_facial = px.bar(df_facial, x='Emotion', y='Score', title='Facial Emotion Distribution', color='Emotion', color_discrete_map=EMOTION_COLORS)
-            fig_facial.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
-            facial_plot_area.plotly_chart(fig_facial, use_container_width=True)
-        else:
-            facial_plot_area.empty()
+        # facial_scores = latest_data.get("facial_emotion_full_scores", {})
+        # if facial_scores and isinstance(facial_scores, dict) and any(facial_scores.values()):
+        #     # Ensure scores are Python floats
+        #     facial_scores_py = {k: float(v) for k, v in facial_scores.items()}
+        #     df_facial = pd.DataFrame(list(facial_scores_py.items()), columns=['Emotion', 'Score']).sort_values(by='Score', ascending=False)
+        #     fig_facial = px.bar(df_facial, x='Emotion', y='Score', title='Facial Emotion Distribution', color='Emotion', color_discrete_map=EMOTION_COLORS)
+        #     fig_facial.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
+        #     facial_plot_area.plotly_chart(fig_facial, use_container_width=True)
+        # else:
+        #     facial_plot_area.empty()
 
 
         # Audio Emotion Full Scores Plot (SER)

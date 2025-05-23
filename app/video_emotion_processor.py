@@ -160,68 +160,47 @@ def process_video(shared_state, video_lock, video_started_event):
 			# Saving to file is optional, so don't stop on errors
 			logger.debug(f"Error saving frame to file: {e}")
 
-		# Run facial emotion analysis periodically
+		# Analyze face for emotion
 		try:
-			# Skip face detection if frame is None
-			if frame is None:
-				continue
+			# Lock before accessing shared_state if necessary, though DeepFace is the dominant time sink here
+			analysis = DeepFace.analyze(
+				frame,
+				actions=['emotion'],
+				enforce_detection=False,
+				silent=True
+			)
 
-			# Convert to RGB (DeepFace expects RGB)
-			rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+			# DeepFace returns a list of dicts, one for each face. We'll take the first.
+			if analysis and isinstance(analysis, list) and len(analysis) > 0:
+				first_face = analysis[0]
+				dominant_emotion = first_face['dominant_emotion']
+				confidence = first_face['emotion'][dominant_emotion] / 100.0  # Normalize to 0-1
+				all_emotions_scores = {k: v / 100.0 for k, v in first_face['emotion'].items()} # Normalize all
 
-			# Detect face using DeepFace
-			analysis = DeepFace.analyze(rgb_frame,
-									  actions=['emotion'],
-									  enforce_detection=False,
-									  silent=True)
+				# Map to unified emotion (optional, but good for consistency)
+				unified_emotion = FACIAL_TO_UNIFIED.get(dominant_emotion, "unknown")
 
-			if analysis and len(analysis) > 0:
-				emotions = analysis[0]['emotion'] # This is a dict like {'angry': 0.1, 'happy': 75.5, ...}
+				logger.info(f"Facial emotion: {unified_emotion} ({confidence:.2f})")
 
-				# New logic to select dominant unified emotion
-				candidate_emotions = []
-				# Iterate through all detected emotions and their scores
-				for emotion_name, score in emotions.items():
-					# Map to a unified emotion category (e.g., 'happy', 'sad', 'neutral', 'angry')
-					# FACIAL_TO_UNIFIED maps raw emotion names to unified ones, or None if not applicable
-					unified_emotion_mapping = FACIAL_TO_UNIFIED.get(emotion_name)
+				# Update shared_state
+				with video_lock: # Ensure thread-safe update
+					shared_state['facial_emotion'] = (unified_emotion, confidence)
+					shared_state['facial_emotion_full_scores'] = all_emotions_scores
+					logger.info(f"SHARED_STATE UPDATE: facial_emotion set to ({unified_emotion}, {confidence:.2f})")
+					logger.debug(f"SHARED_STATE UPDATE: facial_emotion_full_scores set to {all_emotions_scores}")
 
-					# Only consider emotions that have a valid mapping to one of the UNIFIED_EMOTIONS
-					if unified_emotion_mapping is not None:
-						candidate_emotions.append({'name': unified_emotion_mapping, 'score': score})
+			else:
+				# No face detected or empty analysis
+				with video_lock:
+					shared_state['facial_emotion'] = ("unknown", 0.0)
+					shared_state['facial_emotion_full_scores'] = {e: 0.0 for e in FACIAL_TO_UNIFIED.keys() if FACIAL_TO_UNIFIED[e]} # Empty scores for all unified
+				logger.debug("No face detected or empty analysis from DeepFace.")
 
-				if candidate_emotions:
-					# If we have candidates, sort them by score in descending order
-					sorted_candidates = sorted(candidate_emotions, key=lambda x: x['score'], reverse=True)
-					# The dominant unified emotion is the one with the highest score
-					dominant_unified_emotion = sorted_candidates[0]['name']
-					# Confidence is the score of this dominant emotion (0.0 to 100.0), converted to 0.0-1.0
-					confidence = sorted_candidates[0]['score'] / 100.0
-				else:
-					# Fallback if no detected emotions map to a valid unified one.
-					# Defaulting to 'neutral' from UNIFIED_EMOTIONS is a sensible choice.
-					dominant_unified_emotion = "neutral"
-					confidence = 0.0
-
-				# Store the determined unified facial emotion and its confidence in facial_emotion_history
-				if 'facial_emotion_history' in shared_state and hasattr(shared_state['facial_emotion_history'], 'append'):
-					emotion_data = {
-						'dominant_emotion': dominant_unified_emotion,
-						'confidence': confidence,
-						'full_scores': emotions
-					}
-					shared_state['facial_emotion_history'].append(emotion_data)
-				else:
-					# Fallback or initial setup if facial_emotion_history is not a deque
-					# This maintains previous behavior if the deque isn't set up by the caller
-					shared_state['facial_emotion'] = (dominant_unified_emotion, confidence)
-					shared_state['facial_emotion_full_scores'] = emotions
-
-
-				logger.info(f"Facial emotion: {dominant_unified_emotion} ({confidence:.2f})") # Added log
 		except Exception as e:
-			logger.error(f"Error in facial emotion detection: {e}")
-			# Continue processing even if facial detection fails
+			with video_lock:
+				shared_state['facial_emotion'] = ("error", 0.0)
+				shared_state['facial_emotion_full_scores'] = {}
+			logger.error(f"Error during facial emotion analysis: {e}", exc_info=True)
 
 		# Sleep briefly to avoid maxing out CPU
 		time.sleep(0.05)
