@@ -401,7 +401,7 @@ def display_loading_indicator():
 # Define metrics and containers for displaying results
 video_placeholder = st.empty()
 overall_emotion_container = st.empty()
-transcribed_text_area = st.empty()
+# transcribed_text_area = st.empty() # This was moved to be text_container in the layout
 facial_plot_area = st.empty() # Initialize facial_plot_area
 audio_plot_area = st.empty()  # Ensure audio_plot_area is initialized
 text_plot_area = st.empty()   # Ensure text_plot_area is initialized
@@ -409,10 +409,11 @@ facial_emotion_container = None
 text_emotion_container = None
 audio_emotion_container = None
 consistency_container = None
+text_container = None # Added to correctly scope the transcription display area
 
 # Update function for dashboard metrics
 def update_metrics():
-    global latest_data, facial_emotion_container, text_emotion_container, audio_emotion_container, consistency_container, transcribed_text_area, facial_plot_area, audio_plot_area, text_plot_area
+    global latest_data, facial_emotion_container, text_emotion_container, audio_emotion_container, consistency_container, text_container, facial_plot_area, audio_plot_area, text_plot_area
 
     if not facial_emotion_container: # Ensure containers are initialized
         return
@@ -467,9 +468,11 @@ def update_metrics():
         # Transcribed Text
         transcribed_text_value = latest_data.get("transcribed_text", "Waiting for transcription...")
         if not transcribed_text_value or transcribed_text_value.strip() == "" or transcribed_text_value.lower() == "waiting for audio transcription...":
-            transcribed_text_area.markdown("_Waiting for audio transcription..._")
+            if text_container: # Check if text_container is initialized
+                text_container.markdown("_Waiting for audio transcription..._") # Changed
         else:
-            transcribed_text_area.markdown(f"**Transcription:** {transcribed_text_value}")
+            if text_container: # Check if text_container is initialized
+                text_container.markdown(f"**Transcription:** {transcribed_text_value}") # Changed
 
         # Cosine Similarity / Consistency
         cosine_sim = latest_data.get("cosine_similarity", 0.0)
@@ -496,39 +499,41 @@ def update_metrics():
 
 
         # Audio Emotion Full Scores Plot (SER)
-        audio_scores_list = latest_data.get("audio_emotion_full_scores", [])
-        if audio_scores_list and isinstance(audio_scores_list, list) and len(audio_scores_list) > 0:
-            # Ensure scores are Python floats
-            audio_scores_py = [{"emotion": item.get("emotion", "unknown"), "score": float(item.get("score", 0.0))} for item in audio_scores_list]
-            df_audio = pd.DataFrame(audio_scores_py).sort_values(by='score', ascending=False)
-            if not df_audio.empty:
-                fig_audio = px.bar(df_audio, x='emotion', y='score', title='Audio Emotion (SER) Distribution', color='emotion', color_discrete_map=EMOTION_COLORS)
-                fig_audio.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
-                audio_plot_area.plotly_chart(fig_audio, use_container_width=True)
-            else:
-                audio_plot_area.empty()
-        else:
-            audio_plot_area.empty()
+        # audio_scores_list = latest_data.get("audio_emotion_full_scores", [])
+        # if audio_scores_list and isinstance(audio_scores_list, list) and len(audio_scores_list) > 0:
+        #     # Ensure scores are Python floats
+        #     audio_scores_py = [{"emotion": item.get("emotion", "unknown"), "score": float(item.get("score", 0.0))} for item in audio_scores_list]
+        #     df_audio = pd.DataFrame(audio_scores_py).sort_values(by='score', ascending=False)
+        #     if not df_audio.empty:
+        #         fig_audio = px.bar(df_audio, x='emotion', y='score', title='Audio Emotion (SER) Distribution', color='emotion', color_discrete_map=EMOTION_COLORS)
+        #         fig_audio.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
+        #         audio_plot_area.plotly_chart(fig_audio, use_container_width=True)
+        #     else:
+        #         audio_plot_area.empty()
+        # else:
+        #     audio_plot_area.empty()
+        audio_plot_area.empty() # Commented out as per request
 
         # Text Emotion Full Scores (from text_emotion_history, last entry)
-        text_history = latest_data.get("text_emotion_history", [])
-        if text_history and isinstance(text_history, list) and len(text_history) > 0:
-            last_text_scores_entry = text_history[-1] # get the most recent entry
-            if isinstance(last_text_scores_entry, dict) and "scores" in last_text_scores_entry:
-                text_scores = last_text_scores_entry.get("scores", {})
-                if text_scores and isinstance(text_scores, dict) and any(text_scores.values()):
-                    # Ensure scores are Python floats
-                    text_scores_py = {k: float(v) for k, v in text_scores.items()}
-                    df_text = pd.DataFrame(list(text_scores_py.items()), columns=['Emotion', 'Score']).sort_values(by='Score', ascending=False)
-                    fig_text = px.bar(df_text, x='Emotion', y='Score', title='Text Emotion Distribution (Current Segment)', color='Emotion', color_discrete_map=EMOTION_COLORS)
-                    fig_text.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
-                    text_plot_area.plotly_chart(fig_text, use_container_width=True)
-                else:
-                    text_plot_area.empty()
-            else:
-                text_plot_area.empty()
-        else:
-            text_plot_area.empty()
+        # text_history = latest_data.get("text_emotion_history", [])
+        # if text_history and isinstance(text_history, list) and len(text_history) > 0:
+        #     last_text_scores_entry = text_history[-1] # get the most recent entry
+        #     if isinstance(last_text_scores_entry, dict) and "scores" in last_text_scores_entry:
+        #         text_scores = last_text_scores_entry.get("scores", {})
+        #         if text_scores and isinstance(text_scores, dict) and any(text_scores.values()):
+        #             # Ensure scores are Python floats
+        #             text_scores_py = {k: float(v) for k, v in text_scores.items()}
+        #             df_text = pd.DataFrame(list(text_scores_py.items()), columns=['Emotion', 'Score']).sort_values(by='Score', ascending=False)
+        #             fig_text = px.bar(df_text, x='Emotion', y='Score', title='Text Emotion Distribution (Current Segment)', color='Emotion', color_discrete_map=EMOTION_COLORS)
+        #             fig_text.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
+        #             text_plot_area.plotly_chart(fig_text, use_container_width=True)
+        #         else:
+        #             text_plot_area.empty()
+        #     else:
+        #         text_plot_area.empty()
+        # else:
+        #     text_plot_area.empty()
+        text_plot_area.empty() # Commented out as per request
 
     except Exception as e:
         # st.error(f"Error updating metrics: {e}") # Avoid st calls if this is run in a thread sometimes
