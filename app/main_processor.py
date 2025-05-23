@@ -23,9 +23,49 @@ import logging
 import threading
 import numpy as np
 
-from constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS
+from constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS, TEXT_TO_UNIFIED # Ensure TEXT_TO_UNIFIED is imported if used by convert_to_serializable or related logic
 from audio_emotion_processor import audio_processing_loop, record_audio
 from video_emotion_processor import process_video
+
+# Suppress DeepFace logging for cleaner console output
+logging.getLogger('deepface').setLevel(logging.ERROR)
+
+# Logger configuration
+# Ensure logger is configured only once if not already configured by root.
+if not logging.getLogger().handlers: # Check root logger
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__) # Use __name__ for module-specific logger
+
+def convert_to_serializable(obj):
+    """
+    Recursively converts an object to ensure it's JSON serializable.
+    Handles numpy types, deques, and common collections.
+    """
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [convert_to_serializable(i) for i in obj]
+    if isinstance(obj, tuple):
+        # Convert tuples to lists as JSON doesn't have a tuple type,
+        # and lists are generally more common for sequences in JSON.
+        return [convert_to_serializable(i) for i in obj]
+    if isinstance(obj, deque):
+        return [convert_to_serializable(i) for i in list(obj)] # Convert deque to list
+    # Pass through types that are already JSON serializable
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    
+    # For any other unhandled types, log a warning and attempt to convert to string as a fallback.
+    # This might not be ideal for all types but can prevent outright crashes.
+    logger.warning(f"Unhandled type for serialization: {type(obj)}. Converting to string.")
+    return str(obj)
 
 def calculate_cosine_similarity(vector_a, vector_b):
     """
@@ -138,7 +178,9 @@ clear_stale_files()
 def main(emotion_queue=None, stop_event=None, camera_index=0):
     """Main function for emotion detection."""
     global shared_state, model, text_classifier, audio_feature_extractor, audio_classifier, face_cascade
-    global ser_model, ser_processor # Ensure these are global if accessed directly
+    # Ensure ser_model and ser_processor are correctly scoped or passed if needed by audio_processing_loop
+    # Depending on their initialization, they might need to be global or passed differently.
+    # For now, assuming they are initialized and available to audio_processing_loop as intended.
     
     logger.info(f"Detect_emotion main started with camera_index: {camera_index}")
     
@@ -268,162 +310,112 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     try:
         while True:
             # Check if we need to stop
-            if isinstance(shared_state['stop_event'], dict):
+            stop_requested = False
+            if isinstance(shared_state.get('stop_event'), dict):
                 if shared_state['stop_event'].get('stop', False):
-                    print("Stop signal received in main loop")
-                    break
-            elif shared_state['stop_event'] and shared_state['stop_event']:
-                print("Stop event detected in main loop")
+                    stop_requested = True
+            elif hasattr(shared_state.get('stop_event'), 'is_set') and shared_state['stop_event'].is_set():
+                stop_requested = True
+            
+            if stop_requested:
+                logger.info("Stop signal received, exiting main emotion analysis loop.")
                 break
             
-            # Store results for consistency checking
-            latest = {}
-            
-            # Process the latest frame for facial emotion if available
-            if shared_state['latest_frame'] is not None:
-                # We already processed facial emotions in the video thread
-                facial_emotion, confidence = shared_state['facial_emotion']
-                latest['facial_emotion'] = facial_emotion
-                latest['facial_confidence'] = confidence
-                
-                print(f"Facial emotion: {facial_emotion} ({confidence:.2f})")
-            
-            # Print audio emotion if available for debugging
-            audio_emotion, audio_score = shared_state['audio_emotion']
-            if audio_emotion and audio_emotion != "neutral":
-                print(f"Audio emotion: {audio_emotion} ({audio_score:.2f})")
-                
-            # Print text emotion if available for debugging
-            text_emotion, text_score = shared_state['text_emotion']
-            if shared_state['transcribed_text'] and text_emotion != "neutral":
-                print(f"Text emotion: {text_emotion} ({text_score:.2f}) - '{shared_state['transcribed_text'][:30]}...'")
-            
-            # --- Calculate Facial/Audio Consistency ---
-            # logger.info("HARDCODED_TEST_LOG: Inside consistency block") # ADDED FOR DEBUGGING
-            facial_full_scores_dict = shared_state.get('facial_emotion_full_scores', {})
-            audio_full_scores_list = shared_state.get('audio_emotion_full_scores', [])
-
-            # Convert audio scores list to dict format if it's a list of dicts
-            # Expected format for audio_full_scores_list: [{'emotion': 'neu', 'score': 0.7}, ...]
-            audio_scores_dict = {e['emotion']: e['score'] for e in audio_full_scores_list if isinstance(e, dict) and 'emotion' in e and 'score' in e}
-
-            # logger.info(f"CONSISTENCY_DEBUG: Facial Full Scores: {facial_full_scores_dict}")
-            # logger.info(f"CONSISTENCY_DEBUG: Audio Full Scores (List from shared_state): {audio_full_scores_list}")
-            # logger.info(f"CONSISTENCY_DEBUG: Audio Scores (Dict for vectorization): {audio_scores_dict}")
-
-            facial_unified_vector = create_unified_emotion_vector(facial_full_scores_dict, FACIAL_TO_UNIFIED)
-            audio_unified_vector = create_unified_emotion_vector(audio_scores_dict, SER_TO_UNIFIED)
-            
-            # logger.info(f"CONSISTENCY_DEBUG: Facial Unified Vector: {facial_unified_vector}")
-            # logger.info(f"CONSISTENCY_DEBUG: Audio Unified Vector: {audio_unified_vector}")
-            
-            calculated_cosine_similarity = calculate_cosine_similarity(facial_unified_vector, audio_unified_vector)
-            
-            # logger.info(f"CONSISTENCY_DEBUG: Calculated Cosine Similarity: {calculated_cosine_similarity}")
-
-            # Combine all current emotional data
-            PLACEHOLDER_TEXT = "Waiting for audio transcription..."
-            transcribed_text_to_send = shared_state['transcribed_text']
-            if transcribed_text_to_send == PLACEHOLDER_TEXT:
-                transcribed_text_to_send = ""  # Do not send placeholder to UI/queue
-
+            # Prepare data for JSON
+            # Ensure all relevant shared_state items are included
             result_data = {
-                "facial_emotion": shared_state['facial_emotion'],
-                "text_emotion": shared_state['text_emotion'],
-                "audio_emotion": shared_state['audio_emotion'],
-                "transcribed_text": transcribed_text_to_send,
-                "overall_emotion": shared_state['overall_emotion'],
-                "cosine_similarity": calculated_cosine_similarity,
-                "facial_emotion_full_scores": shared_state['facial_emotion_full_scores'],
-                "audio_emotion_full_scores": shared_state['audio_emotion_full_scores'],
-                "facial_emotion_history": list(shared_state['facial_emotion_history']),
-                "text_emotion_history": list(shared_state['text_emotion_history']),
-                "ser_emotion_history": list(shared_state['ser_emotion_history']),
-                "update_id": f"update_{time.time()}" 
+                "timestamp": time.time(),
+                "facial_emotion": shared_state.get('facial_emotion', ("neutral", 0.0)),
+                "text_emotion": shared_state.get('text_emotion', ("neutral", 0.0)),
+                "audio_emotion": shared_state.get('audio_emotion', ("neutral", 0.0)),
+                "overall_emotion": shared_state.get('overall_emotion', "neutral"),
+                "transcribed_text": shared_state.get('transcribed_text', "Waiting for audio transcription..."),
+                "facial_emotion_full_scores": shared_state.get('facial_emotion_full_scores', {}),
+                "audio_emotion_full_scores": shared_state.get('audio_emotion_full_scores', []),
+                "text_emotion_smoothed": shared_state.get('text_emotion_smoothed', ("unknown", 0.0)),
+                "audio_emotion_smoothed": shared_state.get('audio_emotion_smoothed', ("unknown", 0.0)),
+                "facial_emotion_history": list(shared_state.get('facial_emotion_history', [])), # deque to list
+                "text_emotion_history": list(shared_state.get('text_emotion_history', [])),     # deque to list
+                "ser_emotion_history": list(shared_state.get('ser_emotion_history', []))       # deque to list
             }
-            # logger.info(f"CONSISTENCY_DEBUG: Data for JSON/Queue (cosine_similarity): {result_data.get('cosine_similarity')}")
             
-            # Add timestamps to transcriptions to ensure they update in UI
-            if transcribed_text_to_send:
-                result_data["transcribed_text"] = f"{transcribed_text_to_send} [{time.time():.3f}]"
-            else:
-                result_data["transcribed_text"] = ""
-            
-            # First try sending via queue if available
-            if shared_state['emotion_queue'] is not None:
-                try:
-                    # Send without blocking
-                    shared_state['emotion_queue'].put(result_data, block=False)
-                    logger.info(f"Sent emotion data to queue with text: '{result_data['transcribed_text'][:30]}...'")
-                except Exception as e:
-                    logger.error(f"Error sending emotion data to queue: {e}")
-                
-                # Always save to file for dashboard to access - we want to ensure updates
-                try:
-                    # Add a unique identifier to each save to ensure file changes are detected
-                    result_data["update_id"] = f"{time.time():.6f}-{random.randint(1000, 9999)}"
-                    
-                    # Create a JSON-serializable version of the data
-                    serializable_data = {}
-                    
-                    # Convert any NumPy values to standard Python types
-                    for key, value in result_data.items():
-                        if key in ["facial_emotion", "text_emotion", "audio_emotion"]:
-                            # These are tuples with emotion name and confidence
-                            emotion_name, confidence = value
-                            # Convert any NumPy float to Python float
-                            if isinstance(confidence, np.number):
-                                confidence = float(confidence)
-                            # Store as a dictionary to preserve structure in JSON
-                            serializable_data[key] = {"emotion": emotion_name, "confidence": confidence}
-                        elif key == "facial_emotion_full_scores": # ADDED THIS BLOCK
-                            # This is a dict, convert its values (scores) to float
-                            serializable_data[key] = {e_name: float(e_score) if isinstance(e_score, np.number) else e_score 
-                                                      for e_name, e_score in value.items()}
-                        elif isinstance(value, np.number): # Handles other top-level np.number types
-                            serializable_data[key] = float(value)
-                        elif isinstance(value, np.ndarray):
-                            serializable_data[key] = value.tolist()
-                        else:
-                            serializable_data[key] = value
-                    
-                    # Add timestamp to the data
-                    serializable_data["timestamp"] = float(time.time())
-                    
-                    # Also directly copy transcribed_text to ensure it's included
-                    serializable_data["transcribed_text"] = result_data["transcribed_text"]
-                    serializable_data["update_id"] = result_data["update_id"]
-                    
-                    # Log the data being saved
-                    logger.debug(f"Saving emotion data to file with text: '{serializable_data['transcribed_text'][:30]}...'")
-                    
-                    # Save to temp file using a temporary file approach to ensure atomic writes
-                    emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
-                    temp_path = f"{emotion_path}.tmp"
-                    
-                    # First write to a temp file, then rename to the final path
-                    with open(temp_path, 'w') as f:
-                        json.dump(serializable_data, f)
-                        f.flush()
-                        os.fsync(f.fileno())  # Ensure data is written to disk
-                        
-                    # Rename for atomic replacement
-                    shutil.move(temp_path, emotion_path)
+            # Convert the entire result_data structure to be JSON serializable
+            serializable_result_data = convert_to_serializable(result_data)
 
-                    # Log success
-                    logger.debug(f"Successfully wrote emotion data to {emotion_path}")
-                except Exception as e:
-                    logger.error(f"Error saving emotion data to file: {e}")
-                    
-            # Sleep to avoid high CPU usage
-            time.sleep(0.1)
+            # Save to JSON file
+            emotion_file_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
+            # Use a unique temporary file name to prevent race conditions or partial writes
+            temp_emotion_file_path = os.path.join(tempfile.gettempdir(), f"affectlink_emotion_tmp_{os.getpid()}_{time.time_ns()}.json")
+
+            try:
+                with open(temp_emotion_file_path, 'w') as f:
+                    json.dump(serializable_result_data, f, indent=4)
                 
+                # Atomically move/rename the temporary file to the final destination
+                shutil.move(temp_emotion_file_path, emotion_file_path)
+                # logger.debug(f"Emotion data saved to {emotion_file_path}") # Debug level might be more appropriate
+            except TypeError as e:
+                logger.error(f"Error saving emotion data to file (TypeError): {e}")
+                # To aid debugging, log the problematic data structure if the error persists.
+                # Be cautious as this could be very verbose.
+                # logger.error(f"Data causing error (first level): {{k: type(v) for k,v in serializable_result_data.items()}}")
+            except Exception as e:
+                logger.error(f"Unexpected error saving emotion data: {e}")
+                # If temp_emotion_file_path was created, try to clean it up
+                if os.path.exists(temp_emotion_file_path):
+                    try:
+                        os.remove(temp_emotion_file_path)
+                    except Exception as cleanup_err:
+                        logger.error(f"Error cleaning up temporary emotion file: {cleanup_err}")
+            
+            # Send data to queue if it exists
+            if shared_state.get('emotion_queue') is not None:
+                try:
+                    # Send the serializable data to the queue as well
+                    shared_state['emotion_queue'].put(serializable_result_data)
+                    # logger.debug("Sent emotion data to queue.") # Debug level
+                except Exception as q_err:
+                    logger.warning(f"Could not put emotion data to queue: {q_err}")
+
+            time.sleep(0.1) # Main loop processing interval
+            
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received in main_processor. Exiting.")
     except Exception as e:
-        logger.error(f"Error in main loop: {e}")
+        logger.error(f"Critical error in main_processor main loop: {e}")
+        logger.error(traceback.format_exc())
     finally:
+        logger.info("Main_processor cleaning up and stopping threads...")
         # Signal threads to stop
-        if isinstance(shared_state['stop_event'], dict):
+        if isinstance(shared_state.get('stop_event'), dict):
             shared_state['stop_event']['stop'] = True
-        print("Waiting for threads to finish...")
-        # Wait for threads to finish gracefully
-        time.sleep(2)
+        elif hasattr(shared_state.get('stop_event'), 'set'): # Check if it's an Event-like object
+            shared_state['stop_event'].set()
+        
+        # Wait for threads to finish (optional, as they are daemons)
+        # Giving a brief moment for daemon threads to attempt cleanup if they have try/finally blocks
+        time.sleep(1) 
+        logger.info("Main_processor finished.")
+
+if __name__ == '__main__':
+    # This part is typically called by start_realtime.py or run_app.py as a subprocess
+    # or if the script is run directly for testing.
+    
+    # Example of direct invocation (for testing purposes)
+    # Create a dummy stop event (threading.Event) if running standalone
+    stop_event_main = threading.Event()
+    
+    # For direct testing, you might not have a queue from another process.
+    # main(stop_event=stop_event_main, camera_index=0)
+    
+    # The actual entry point when run via multiprocessing in run_app.py doesn't need this __main__ block
+    # to call main() again, as the target function for the process is main().
+    # However, if this script is intended to be runnable standalone for some reason:
+    logger.info("main_processor.py executed directly (likely for testing or unintended use).")
+    # Consider what should happen if run directly. For now, just log.
+    # If you need to parse arguments for camera_index when run directly:
+    # import argparse
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--camera_index", type=int, default=0)
+    # args = parser.parse_args()
+    # main(stop_event=stop_event_main, camera_index=args.camera_index)

@@ -71,7 +71,11 @@ def process_video(shared_state, video_lock, video_started_event):
 
 	if cap is None:
 		logger.error("Failed to initialize webcam - skipping video analysis")
+		video_started_event.set() # Set event even if webcam fails, so audio can start
 		return
+
+	logger.info("Webcam initialized successfully.")
+	video_started_event.set() # Signal that video (or attempt) has started
 
 	# Get shared frame queue from shared_state if available
 	# (Assuming 'stop_event' key in shared_state might hold more than just the event)

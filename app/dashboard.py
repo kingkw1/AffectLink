@@ -18,6 +18,12 @@ logging.getLogger('streamlit.runtime.scriptrunner_utils.script_run_context').set
 
 # Then import Streamlit
 import streamlit as st
+st.set_page_config(
+    page_title="AffectLink Emotion Dashboard",
+    page_icon="😊",
+    layout="wide"
+)
+
 import cv2
 import numpy as np
 import time
@@ -28,6 +34,8 @@ import os
 import sys
 import multiprocessing
 from multiprocessing.queues import Empty as MPQueueEmpty
+import pandas as pd
+import plotly.express as px
 
 # Initialize session state variables at the very beginning
 if 'enable_video' not in st.session_state:
@@ -64,10 +72,15 @@ emotion_data_queue = None
 
 # Store latest emotion data
 latest_data = {
-    "facial_emotion": ("unknown", 0.0), # Initial structure as tuple
-    "text_emotion": ("unknown", 0.0),   # Initial structure as tuple
-    "audio_emotion": ("unknown", 0.0),  # Initial structure as tuple
-    "transcribed_text": "",
+    "facial_emotion": {"emotion": "unknown", "confidence": 0.0},
+    "text_emotion": {"emotion": "unknown", "confidence": 0.0},
+    "audio_emotion": {"emotion": "unknown", "confidence": 0.0},
+    "transcribed_text": "Waiting for transcription...", # Default text
+    "facial_emotion_full_scores": {},
+    "audio_emotion_full_scores": [],
+    "text_emotion_smoothed": {"emotion": "unknown", "confidence": 0.0}, # Add smoothed placeholders
+    "audio_emotion_smoothed": {"emotion": "unknown", "confidence": 0.0},# Add smoothed placeholders
+    "overall_emotion": "unknown", # Add overall emotion placeholder
     "cosine_similarity": 0.0,
     "consistency_level": "Unknown",
     "update_id": "initial_0"
@@ -386,6 +399,12 @@ def display_loading_indicator():
     st.session_state.loading_shown = True
 
 # Define metrics and containers for displaying results
+video_placeholder = st.empty()
+overall_emotion_container = st.empty()
+transcribed_text_area = st.empty()
+facial_plot_area = st.empty() # Initialize facial_plot_area
+audio_plot_area = st.empty()  # Ensure audio_plot_area is initialized
+text_plot_area = st.empty()   # Ensure text_plot_area is initialized
 facial_emotion_container = None
 text_emotion_container = None
 audio_emotion_container = None
@@ -393,142 +412,129 @@ consistency_container = None
 
 # Update function for dashboard metrics
 def update_metrics():
-    """Update the metrics displayed on the dashboard"""
-    global latest_data
-    
-    # Get latest data safely
-    # No need to try/except here as latest_data is a global dict
-    
-    # Update facial emotion metric
+    global latest_data, facial_emotion_container, text_emotion_container, audio_emotion_container, consistency_container, transcribed_text_area, facial_plot_area, audio_plot_area, text_plot_area
+
+    if not facial_emotion_container: # Ensure containers are initialized
+        return
+
     try:
-        # Ensure facial_emotion_data is a dict, as expected by detect_emotion.py
-        facial_emotion_data = latest_data.get("facial_emotion", {"emotion": "unknown", "confidence": 0.0})
-        if isinstance(facial_emotion_data, tuple) and len(facial_emotion_data) == 2: # Handle old tuple format if necessary
-            facial_emotion, facial_confidence = facial_emotion_data
-        elif isinstance(facial_emotion_data, dict):
-            facial_emotion = facial_emotion_data.get("emotion", "unknown")
-            facial_confidence = facial_emotion_data.get("confidence", 0.0)
+        # Defensive: convert list/tuple to dict for emotion fields
+        def ensure_emotion_dict(val):
+            if isinstance(val, dict):
+                return val
+            if isinstance(val, (list, tuple)) and len(val) == 2:
+                return {"emotion": str(val[0]), "confidence": float(val[1])}
+            return {"emotion": "unknown", "confidence": 0.0}
+
+        facial_emotion_data = ensure_emotion_dict(latest_data.get("facial_emotion"))
+        facial_emotion_name = facial_emotion_data.get("emotion", "unknown")
+        facial_emotion_score = facial_emotion_data.get("confidence", 0.0)
+        facial_emotion_container.metric(
+            label="Facial Emotion",
+            value=f"{facial_emotion_name.capitalize()}",
+            delta=f"{facial_emotion_score:.2f}",
+            help="Dominant facial emotion and confidence score."
+        )
+
+        text_emotion_data_smoothed = ensure_emotion_dict(latest_data.get("text_emotion_smoothed"))
+        text_emotion_name_smoothed = text_emotion_data_smoothed.get("emotion", "unknown")
+        text_emotion_score_smoothed = text_emotion_data_smoothed.get("confidence", 0.0)
+        text_emotion_container.metric(
+            label="Text Emotion (Smoothed)",
+            value=f"{text_emotion_name_smoothed.capitalize()}",
+            delta=f"{text_emotion_score_smoothed:.2f}",
+            help="Smoothed dominant text-based emotion and confidence score."
+        )
+
+        audio_emotion_data_smoothed = ensure_emotion_dict(latest_data.get("audio_emotion_smoothed"))
+        audio_emotion_name_smoothed = audio_emotion_data_smoothed.get("emotion", "unknown")
+        audio_emotion_score_smoothed = audio_emotion_data_smoothed.get("confidence", 0.0)
+        audio_emotion_container.metric(
+            label="Audio Emotion (Smoothed)",
+            value=f"{audio_emotion_name_smoothed.capitalize()}",
+            delta=f"{audio_emotion_score_smoothed:.2f}",
+            help="Smoothed dominant audio-based emotion (SER) and confidence score."
+        )
+
+        # Overall Emotion
+        overall_emotion_value = latest_data.get("overall_emotion", "unknown")
+        overall_emotion_container.metric(
+            label="Overall Emotion",
+            value=f"{overall_emotion_value.capitalize()}",
+            help="Estimated overall emotional state."
+        )
+
+        # Transcribed Text
+        transcribed_text_value = latest_data.get("transcribed_text", "Waiting for transcription...")
+        if not transcribed_text_value or transcribed_text_value.strip() == "" or transcribed_text_value.lower() == "waiting for audio transcription...":
+            transcribed_text_area.markdown("_Waiting for audio transcription..._")
         else:
-            facial_emotion, facial_confidence = "unknown", 0.0
+            transcribed_text_area.markdown(f"**Transcription:** {transcribed_text_value}")
 
-        if facial_emotion_container: # Ensure container exists
-            facial_emotion_display = facial_emotion.capitalize() if facial_emotion else "Unknown"
-            facial_emotion_container.metric(
-                "Facial Emotion",
-                f"{facial_emotion_display} ({facial_confidence:.2f})"
-            )
+        # Cosine Similarity / Consistency
+        cosine_sim = latest_data.get("cosine_similarity", 0.0)
+        consistency_level = get_consistency_level(cosine_sim)
+        consistency_container.metric(
+            label="Emotion Consistency",
+            value=consistency_level,
+            delta=f"Cosine Sim: {cosine_sim:.2f}",
+            help="Consistency between facial and text emotion vectors."
+        )
+
+        # Update Plots
+        # Facial Emotion Full Scores Plot
+        facial_scores = latest_data.get("facial_emotion_full_scores", {})
+        if facial_scores and isinstance(facial_scores, dict) and any(facial_scores.values()):
+            # Ensure scores are Python floats
+            facial_scores_py = {k: float(v) for k, v in facial_scores.items()}
+            df_facial = pd.DataFrame(list(facial_scores_py.items()), columns=['Emotion', 'Score']).sort_values(by='Score', ascending=False)
+            fig_facial = px.bar(df_facial, x='Emotion', y='Score', title='Facial Emotion Distribution', color='Emotion', color_discrete_map=EMOTION_COLORS)
+            fig_facial.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
+            facial_plot_area.plotly_chart(fig_facial, use_container_width=True)
+        else:
+            facial_plot_area.empty()
+
+
+        # Audio Emotion Full Scores Plot (SER)
+        audio_scores_list = latest_data.get("audio_emotion_full_scores", [])
+        if audio_scores_list and isinstance(audio_scores_list, list) and len(audio_scores_list) > 0:
+            # Ensure scores are Python floats
+            audio_scores_py = [{"emotion": item.get("emotion", "unknown"), "score": float(item.get("score", 0.0))} for item in audio_scores_list]
+            df_audio = pd.DataFrame(audio_scores_py).sort_values(by='score', ascending=False)
+            if not df_audio.empty:
+                fig_audio = px.bar(df_audio, x='emotion', y='score', title='Audio Emotion (SER) Distribution', color='emotion', color_discrete_map=EMOTION_COLORS)
+                fig_audio.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
+                audio_plot_area.plotly_chart(fig_audio, use_container_width=True)
+            else:
+                audio_plot_area.empty()
+        else:
+            audio_plot_area.empty()
+
+        # Text Emotion Full Scores (from text_emotion_history, last entry)
+        text_history = latest_data.get("text_emotion_history", [])
+        if text_history and isinstance(text_history, list) and len(text_history) > 0:
+            last_text_scores_entry = text_history[-1] # get the most recent entry
+            if isinstance(last_text_scores_entry, dict) and "scores" in last_text_scores_entry:
+                text_scores = last_text_scores_entry.get("scores", {})
+                if text_scores and isinstance(text_scores, dict) and any(text_scores.values()):
+                    # Ensure scores are Python floats
+                    text_scores_py = {k: float(v) for k, v in text_scores.items()}
+                    df_text = pd.DataFrame(list(text_scores_py.items()), columns=['Emotion', 'Score']).sort_values(by='Score', ascending=False)
+                    fig_text = px.bar(df_text, x='Emotion', y='Score', title='Text Emotion Distribution (Current Segment)', color='Emotion', color_discrete_map=EMOTION_COLORS)
+                    fig_text.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
+                    text_plot_area.plotly_chart(fig_text, use_container_width=True)
+                else:
+                    text_plot_area.empty()
+            else:
+                text_plot_area.empty()
+        else:
+            text_plot_area.empty()
+
     except Exception as e:
-        print(f"Debug: Error updating facial emotion metric: {e}")
-        pass
-
-    # Update transcribed text
-    try:
-        transcribed_text = latest_data.get("transcribed_text", "")
-        if text_container: # Ensure container exists
-            if transcribed_text:
-                # Display the text, removing the timestamp if present for cleaner UI
-                display_text = transcribed_text.split(" [ts:")[0]
-                text_container.markdown(f"> {display_text}")
-            else:
-                text_container.markdown("_Waiting for transcription..._")
-    except Exception as e:
-        print(f"Debug: Error updating transcribed text: {e}")
-        pass
-    
-    # Check if audio processing is disabled (with fallback)
-    audio_enabled = True
-    try:
-        audio_enabled = st.session_state.enable_audio
-    except (AttributeError, KeyError):
-        pass # Default to enabled if session state not available
-        
-    if not audio_enabled:
-        if text_emotion_container: # Ensure container exists
-            text_emotion_container.metric("Text Emotion", "Audio Disabled")
-        if audio_emotion_container: # Ensure container exists
-            audio_emotion_container.metric("Audio Emotion", "Audio Disabled")
-    else:
-        # Update text emotion metric
-        try:
-            # Ensure text_emotion_data is a dict, as expected by detect_emotion.py
-            text_emotion_data = latest_data.get("text_emotion", {"emotion": "unknown", "confidence": 0.0})
-            if isinstance(text_emotion_data, tuple) and len(text_emotion_data) == 2:
-                text_emotion, text_confidence = text_emotion_data
-            elif isinstance(text_emotion_data, dict):
-                text_emotion = text_emotion_data.get("emotion", "unknown")
-                text_confidence = text_emotion_data.get("confidence", 0.0)
-            else:
-                text_emotion, text_confidence = "unknown", 0.0
-            
-            if text_emotion_container: # Ensure container exists
-                text_emotion_display = text_emotion.capitalize() if text_emotion else "Unknown"
-                text_emotion_container.metric(
-                    "Text Emotion",
-                    f"{text_emotion_display} ({text_confidence:.2f})"
-                )
-        except Exception as e:
-            print(f"Debug: Error updating text emotion metric: {e}")
-            pass
-
-        # Update audio emotion metric
-        try:
-            # Ensure audio_emotion_data is a dict, as expected by detect_emotion.py
-            audio_emotion_data = latest_data.get("audio_emotion", {"emotion": "unknown", "confidence": 0.0})
-            if isinstance(audio_emotion_data, tuple) and len(audio_emotion_data) == 2:
-                audio_emotion, audio_confidence = audio_emotion_data
-            elif isinstance(audio_emotion_data, dict):
-                audio_emotion = audio_emotion_data.get("emotion", "unknown")
-                audio_confidence = audio_emotion_data.get("confidence", 0.0)
-            else:
-                audio_emotion, audio_confidence = "unknown", 0.0
-
-            if audio_emotion_container: # Ensure container exists
-                audio_emotion_display = audio_emotion.capitalize() if audio_emotion else "Unknown"
-                audio_emotion_container.metric(
-                    "Audio Emotion",
-                    f"{audio_emotion_display} ({audio_confidence:.2f})"
-                )
-        except Exception as e:
-            print(f"Debug: Error updating audio emotion metric: {e}")
-            pass
-
-    # Update consistency - only show meaningful consistency when both video and audio are enabled
-    # Get toggle states with fallback
-    video_enabled = True
-    audio_enabled = True # Already defined above, re-checking for clarity in this block
-    try:
-        video_enabled = st.session_state.enable_video
-    except (AttributeError, KeyError):
-        pass # Default to enabled if session state not available
-        
-    try:
-        audio_enabled = st.session_state.enable_audio
-    except (AttributeError, KeyError):
-        pass # Default to enabled if session state not available
-        
-    if not video_enabled or not audio_enabled:
-        if consistency_container: # Ensure container exists
-            consistency_display = "Video/Audio Disabled"
-            if not video_enabled and not audio_enabled:
-                consistency_display = "Video & Audio Disabled"
-            elif not video_enabled:
-                consistency_display = "Video Disabled"
-            elif not audio_enabled: # This case is covered by the outer if, but good for clarity
-                consistency_display = "Audio Disabled"
-            consistency_container.metric("Consistency", consistency_display)
-    else:
-        # Update consistency metric
-        try:
-            cosine_similarity = latest_data.get("cosine_similarity", 0.0)
-            consistency_level = get_consistency_level(cosine_similarity)
-            if consistency_container: # Ensure container exists
-                consistency_container.metric(
-                    "Consistency",
-                    f"{consistency_level} ({cosine_similarity:.2f})"
-                )
-        except Exception as e:
-            print(f"Debug: Error updating consistency metric: {e}")
-            pass
+        # st.error(f"Error updating metrics: {e}") # Avoid st calls if this is run in a thread sometimes
+        print(f"Error updating dashboard metrics: {e}")
+        import traceback
+        print(traceback.format_exc())
 
 # Define shared data receiver thread
 def receive_emotion_data_thread(mp_queue, stop_event):
@@ -689,12 +695,6 @@ def receive_emotion_data_thread(mp_queue, stop_event):
         print("Audio data receiver thread stopped due to audio toggle disabled")
 
 # Main Streamlit app
-st.set_page_config(
-    page_title="AffectLink Emotion Dashboard",
-    page_icon="😊",
-    layout="wide"
-)
-
 st.title("AffectLink Real-time Multimodal Emotion Analysis")
 
 # Create placeholders for dynamic content
@@ -709,17 +709,15 @@ with col1:
 
 with col2:
     st.subheader("Emotion Analysis")
-    
     facial_emotion_container = st.empty()
     st.markdown("---")
-    
     st.markdown("### Audio Analysis")
     text_emotion_container = st.empty()
     audio_emotion_container = st.empty()
     st.markdown("---")
-    
     st.markdown("### Overall Consistency")
     consistency_container = st.empty()
+    overall_emotion_container = st.empty() # Added in previous step
 
 # Define the main function for the dashboard application
 def main(emotion_queue=None, stop_event=None, frame_queue=None):

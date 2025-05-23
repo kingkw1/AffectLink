@@ -451,85 +451,71 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, s
                         logger.info(f"Audio emotion: {unified_audio_emotion} ({audio_score:.2f})")
                         # Update the shared state directly for dashboard access
                         shared_state['audio_emotion'] = (unified_audio_emotion, audio_score)
-                        if audio_emotions_full_results: # Store full results
+                        if audio_emotions_full_results:
                             shared_state['audio_emotion_full_scores'] = audio_emotions_full_results
+                        else:
+                            shared_state['audio_emotion_full_scores'] = []
 
                         logger.info(f"SHARED_STATE UPDATE: audio_emotion set to ({unified_audio_emotion}, {audio_score:.2f})")
                     else:
                         logger.debug("Audio emotion analysis returned no valid results or score was None")
                         # Ensure shared_state reflects no valid audio emotion if analysis fails
-                        if shared_state.get('audio_emotion') != ("unknown", 0.0):
-                             shared_state['audio_emotion'] = ("unknown", 0.0) # Default to unknown
-                             shared_state['audio_emotion_full_scores'] = [] # Clear scores
-                             logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to (\\'unknown\\', 0.0) due to failed analysis")
+                        shared_state['audio_emotion'] = ("unknown", 0.0)
+                        shared_state['audio_emotion_full_scores'] = []
 
                 except Exception as audio_err:
                     logger.error(f"Error analyzing audio emotion: {audio_err}")
-                    if shared_state.get('audio_emotion') != ("unknown", 0.0):
-                        shared_state['audio_emotion'] = ("unknown", 0.0) # Default to unknown on error
-                        shared_state['audio_emotion_full_scores'] = [] # Clear scores
-                        logger.info(f"SHARED_STATE UPDATE: audio_emotion reset to (\\'unknown\\', 0.0) due to exception")
+                    logger.error(traceback.format_exc()) # Add traceback
+                    shared_state['audio_emotion'] = ("unknown", 0.0)
+                    shared_state['audio_emotion_full_scores'] = []
 
                 # Clean up temp file
                 if isinstance(temp_wav, str) and os.path.exists(temp_wav):
                     try:
-                        os.unlink(temp_wav)
-                    except:
-                        pass  # Ignore cleanup errors
+                        os.remove(temp_wav)
+                        logger.debug(f"Successfully removed temp audio file: {temp_wav}")
+                    except OSError as e:
+                        logger.warning(f"Error removing temp audio file {temp_wav}: {e}")
 
                 # Smoothing text emotions - similar to original but with better error handling
                 if unified_text_emotion != "unknown" and text_score is not None: # Use unified_text_emotion and check text_score
                     emotion_window.append(unified_text_emotion) # Use unified_text_emotion
                     score_window.append(text_score)
-                    try:
-                        smoothed_emotion = max(set(emotion_window), key=emotion_window.count)
-                        smoothed_score = moving_average([s for e, s in zip(emotion_window, score_window) if e == smoothed_emotion])
 
-                        log_entry_text = {
-                            'timestamp': time.time(),
-                            'modality': 'text',
-                            'emotion': smoothed_emotion,
-                            'confidence': smoothed_score,
-                            'emotion_scores': unified_text_scores # Corrected variable name
-                        }
-                        # Append to shared_state['text_emotion_history'] instead of audio_emotion_log
-                        if 'text_emotion_history' in shared_state and hasattr(shared_state['text_emotion_history'], 'append'):
-                            shared_state['text_emotion_history'].append(log_entry_text)
-                        else:
-                            logger.warning("shared_state['text_emotion_history'] is not available or not a deque.")
-                    except Exception as e:
-                        logger.error(f"Error in text emotion smoothing: {e}")
+                    if len(emotion_window) == smoothing_window:
+                        most_frequent_emotion = max(set(emotion_window), key=list(emotion_window).count)
+                        relevant_scores = [s for e, s in zip(emotion_window, score_window) if e == most_frequent_emotion]
+                        smoothed_score = moving_average(relevant_scores) if relevant_scores else 0.0
+                        shared_state['text_emotion_smoothed'] = (most_frequent_emotion, smoothed_score)
+                        logger.info(f"SHARED_STATE UPDATE: text_emotion_smoothed set to ({most_frequent_emotion}, {smoothed_score:.2f}) after smoothing")
+                    else:
+                        shared_state['text_emotion_smoothed'] = (unified_text_emotion, text_score)
+                        logger.info(f"SHARED_STATE UPDATE: text_emotion_smoothed set to ({unified_text_emotion}, {text_score:.2f}) (insufficient window)")
+                else:
+                    shared_state['text_emotion_smoothed'] = ("unknown", 0.0)
+                    logger.info(f"SHARED_STATE UPDATE: text_emotion_smoothed set to ('unknown', 0.0) due to invalid current text emotion")
 
                 # Smoothing audio emotions
-                # Use the unified_audio_emotion that was determined earlier in the loop
                 if unified_audio_emotion != "unknown" and audio_score is not None:
-                    audio_emotion_window.append(unified_audio_emotion) # Use unified_audio_emotion
+                    audio_emotion_window.append(unified_audio_emotion)
                     audio_score_window.append(audio_score)
-                    try:
-                        smoothed_audio_emotion = max(set(audio_emotion_window), key=audio_emotion_window.count)
-                        smoothed_audio_score = moving_average([s for e, s in zip(audio_emotion_window, audio_score_window) if e == smoothed_audio_emotion])
 
-                        # Append to shared_state['ser_emotion_history'] instead of audio_emotion_log
-                        if 'ser_emotion_history' in shared_state and hasattr(shared_state['ser_emotion_history'], 'append'):
-                            shared_state['ser_emotion_history'].append({
-                                'timestamp': time.time(),
-                                'modality': 'audio',
-                                'emotion': smoothed_audio_emotion,
-                                'confidence': smoothed_audio_score,
-                                'emotion_scores': None
-                            })
-                        else:
-                            logger.warning("shared_state['ser_emotion_history'] is not available or not a deque.")
-                    except Exception as e:
-                        logger.error(f"Error in audio emotion smoothing: {e}")
-
-                # Sleep to avoid high CPU usage
-                time.sleep(0.2) # Reduced sleep time
+                    if len(audio_emotion_window) == smoothing_window:
+                        most_frequent_audio_emotion = max(set(audio_emotion_window), key=list(audio_emotion_window).count)
+                        relevant_audio_scores = [s for e, s in zip(audio_emotion_window, audio_score_window) if e == most_frequent_audio_emotion]
+                        smoothed_audio_score = moving_average(relevant_audio_scores) if relevant_audio_scores else 0.0
+                        shared_state['audio_emotion_smoothed'] = (most_frequent_audio_emotion, smoothed_audio_score)
+                        logger.info(f"SHARED_STATE UPDATE: audio_emotion_smoothed set to ({most_frequent_audio_emotion}, {smoothed_audio_score:.2f}) after smoothing")
+                    else:
+                        shared_state['audio_emotion_smoothed'] = (unified_audio_emotion, audio_score)
+                        logger.info(f"SHARED_STATE UPDATE: audio_emotion_smoothed set to ({unified_audio_emotion}, {audio_score:.2f}) (insufficient window)")
+                else:
+                    shared_state['audio_emotion_smoothed'] = ("unknown", 0.0)
+                    logger.info(f"SHARED_STATE UPDATE: audio_emotion_smoothed set to ('unknown', 0.0) due to invalid current audio emotion")
 
             except Exception as e:
-                logger.error(f"Error in audio processing loop: {e}")
+                logger.error(f"Error in audio processing loop iteration: {e}")
                 logger.error(traceback.format_exc())
-                time.sleep(1)
     except Exception as e:
         logger.error(f"Fatal error in audio processing thread: {e}")
         logger.error(traceback.format_exc())
