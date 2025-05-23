@@ -12,7 +12,7 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
     
-from camera_utils import find_available_camera
+from app.run_app import find_available_camera
 
 def test_webcam():
     print("Testing webcam availability with camera_utils.find_available_camera...")

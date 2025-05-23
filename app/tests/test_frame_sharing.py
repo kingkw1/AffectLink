@@ -20,7 +20,7 @@ if parent_dir not in sys.path:
 current_dir = os.path.dirname(os.path.abspath(__file__))
 app_dir = parent_dir
     
-from camera_utils import find_available_camera
+from app.run_app import find_available_camera
 
 def camera_process(frame_queue, stop_event):
     """Process that captures camera frames and shares them via the queue"""
