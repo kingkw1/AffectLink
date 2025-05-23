@@ -167,34 +167,41 @@ def process_video(shared_state, video_lock, video_started_event):
 				frame,
 				actions=['emotion'],
 				enforce_detection=False,
-				silent=True
+				silent=True  # Suppress DeepFace's own console output
 			)
 
-			# DeepFace returns a list of dicts, one for each face. We'll take the first.
 			if analysis and isinstance(analysis, list) and len(analysis) > 0:
 				first_face = analysis[0]
-				dominant_emotion = first_face['dominant_emotion']
-				confidence = first_face['emotion'][dominant_emotion] / 100.0  # Normalize to 0-1
-				all_emotions_scores = {k: v / 100.0 for k, v in first_face['emotion'].items()} # Normalize all
+				# Get all raw scores from DeepFace, normalized to 0-1
+				raw_emotion_scores = {k: v / 100.0 for k, v in first_face['emotion'].items()}
 
-				# Map to unified emotion (optional, but good for consistency)
-				unified_emotion = FACIAL_TO_UNIFIED.get(dominant_emotion, "unknown")
-
-				logger.info(f"Facial emotion: {unified_emotion} ({confidence:.2f})")
+				valid_unified_scores = {}
+				for raw_emotion, raw_score in raw_emotion_scores.items():
+					unified_map_target = FACIAL_TO_UNIFIED.get(raw_emotion)
+					# Only consider emotions that map to a valid UNIFIED_EMOTION (i.e., not None in the mapping)
+					if unified_map_target is not None:
+						valid_unified_scores[unified_map_target] = max(valid_unified_scores.get(unified_map_target, 0.0), raw_score)
+				
+				final_emotion = "unknown"
+				final_confidence = 0.0
+				if valid_unified_scores and any(s > 0 for s in valid_unified_scores.values()):
+					# Find the dominant emotion from the filtered valid_unified_scores
+					final_emotion = max(valid_unified_scores, key=valid_unified_scores.get)
+					final_confidence = valid_unified_scores[final_emotion]
+				
+				logger.info(f"Facial emotion (filtered): {final_emotion} ({final_confidence:.2f})")
 
 				# Update shared_state
-				with video_lock: # Ensure thread-safe update
-					shared_state['facial_emotion'] = (unified_emotion, confidence)
-					shared_state['facial_emotion_full_scores'] = all_emotions_scores
-					logger.info(f"SHARED_STATE UPDATE: facial_emotion set to ({unified_emotion}, {confidence:.2f})")
-					logger.debug(f"SHARED_STATE UPDATE: facial_emotion_full_scores set to {all_emotions_scores}")
-
-			else:
-				# No face detected or empty analysis
+				with video_lock:					
+					shared_state['facial_emotion'] = (final_emotion, final_confidence)
+					# Store the full RAW (but normalized) scores from DeepFace for potential detailed view or debugging
+					shared_state['facial_emotion_full_scores'] = raw_emotion_scores
+			else: # No face detected or error in analysis
+				# If no face is detected, or analysis is empty, report unknown
 				with video_lock:
 					shared_state['facial_emotion'] = ("unknown", 0.0)
-					shared_state['facial_emotion_full_scores'] = {e: 0.0 for e in FACIAL_TO_UNIFIED.keys() if FACIAL_TO_UNIFIED[e]} # Empty scores for all unified
-				logger.debug("No face detected or empty analysis from DeepFace.")
+					shared_state['facial_emotion_full_scores'] = {} # Clear full scores too
+				logger.debug("No face detected or analysis empty.")
 
 		except Exception as e:
 			with video_lock:
