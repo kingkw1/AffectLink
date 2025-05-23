@@ -404,6 +404,7 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, s
                             actual_scores_to_process, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
                         )
                         logger.info(f"Unified text scores: {unified_text_scores}") # Log unified scores
+                        shared_state['text_emotion_unified_scores'] = unified_text_scores # Store for main_processor
 
                         shared_state['text_emotion_history'].append({
                             'timestamp': time.time(),

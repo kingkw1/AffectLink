@@ -67,6 +67,19 @@ def convert_to_serializable(obj):
     logger.warning(f"Unhandled type for serialization: {type(obj)}. Converting to string.")
     return str(obj)
 
+def get_consistency_level(cosine_sim):
+    """Convert cosine similarity to consistency level label"""
+    if cosine_sim >= 0.8:
+        return "High"
+    elif cosine_sim >= 0.6:
+        return "Medium"
+    elif cosine_sim >= 0.3:
+        return "Low"
+    elif cosine_sim <= 0.01: # Match dashboard's "Unknown" condition
+        return "Unknown" 
+    else: # Covers 0.01 < cosine_sim < 0.3
+        return "Very Low"
+
 def calculate_cosine_similarity(vector_a, vector_b):
     """
     Calculate cosine similarity between two vectors
@@ -336,9 +349,77 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                 "audio_emotion_smoothed": shared_state.get('audio_emotion_smoothed', ("unknown", 0.0)),
                 "facial_emotion_history": list(shared_state.get('facial_emotion_history', [])), # deque to list
                 "text_emotion_history": list(shared_state.get('text_emotion_history', [])),     # deque to list
-                "ser_emotion_history": list(shared_state.get('ser_emotion_history', []))       # deque to list
+                "ser_emotion_history": list(shared_state.get('ser_emotion_history', [])),       # deque to list
+                "text_emotion_unified_scores": shared_state.get('text_emotion_unified_scores', {}), # Add this line
+                "cosine_similarity": 0.0, # Placeholder, will be calculated next
+                "consistency_level": "Unknown" # Placeholder
             }
             
+            # Calculate overall emotion and cosine similarity
+            # Ensure all emotion data is available and in the correct format
+            facial_emotion_data = shared_state.get('facial_emotion_full_scores', {})
+            audio_emotion_data = shared_state.get('audio_emotion_full_scores', []) # This is a list of dicts
+            text_emotion_data = shared_state.get('text_emotion_unified_scores', {}) # This is a dict
+
+            # Create unified vectors
+            facial_vector = create_unified_emotion_vector(facial_emotion_data, FACIAL_TO_UNIFIED)
+            
+            # For audio, convert list of dicts to dict for create_unified_emotion_vector
+            audio_scores_dict = {item['emotion']: item['score'] for item in audio_emotion_data if isinstance(item, dict) and 'emotion' in item and 'score' in item}
+            audio_vector = create_unified_emotion_vector(audio_scores_dict, SER_TO_UNIFIED)
+            
+            # Text data is already in unified format from audio_emotion_processor
+            # but create_unified_emotion_vector expects a mapping, so we pass an identity-like mapping or ensure it's already a vector
+            # For simplicity, if text_emotion_data is already a unified score dict, we can use it directly if it matches UNIFIED_EMOTIONS order
+            # Or, ensure create_unified_emotion_vector can handle it or pre-process it.
+            # Assuming text_emotion_data is {unified_emotion: score, ...}
+            text_vector = [text_emotion_data.get(emotion, 0.0) for emotion in UNIFIED_EMOTIONS]
+            # Normalize text_vector if not already normalized
+            text_total = sum(text_vector)
+            if text_total > 0:
+                text_vector = [score/text_total for score in text_vector]
+
+            # Calculate pairwise cosine similarities
+            similarity_fa = calculate_cosine_similarity(facial_vector, audio_vector)
+            similarity_ft = calculate_cosine_similarity(facial_vector, text_vector)
+            similarity_at = calculate_cosine_similarity(audio_vector, text_vector)
+            
+            # Average similarity (or other combination logic)
+            # Consider only valid similarities (e.g. if a modality is not present, its vector might be all zeros)
+            valid_similarities = []
+            if facial_vector != [0.0] * len(UNIFIED_EMOTIONS) and audio_vector != [0.0] * len(UNIFIED_EMOTIONS):
+                valid_similarities.append(similarity_fa)
+            if facial_vector != [0.0] * len(UNIFIED_EMOTIONS) and text_vector != [0.0] * len(UNIFIED_EMOTIONS):
+                valid_similarities.append(similarity_ft)
+            if audio_vector != [0.0] * len(UNIFIED_EMOTIONS) and text_vector != [0.0] * len(UNIFIED_EMOTIONS):
+                valid_similarities.append(similarity_at)
+
+            if valid_similarities:
+                overall_cosine_similarity = sum(valid_similarities) / len(valid_similarities)
+            else:
+                overall_cosine_similarity = 0.0 # Default if no valid pairs
+
+            result_data["cosine_similarity"] = overall_cosine_similarity
+            result_data["consistency_level"] = get_consistency_level(overall_cosine_similarity)
+            
+            # Determine overall dominant emotion (simple majority or weighted average of vectors)
+            # For now, let's average the vectors and find the max component
+            if facial_vector and audio_vector and text_vector: # Ensure all vectors are non-empty
+                avg_vector = [
+                    (f + a + t) / 3 
+                    for f, a, t in zip(facial_vector, audio_vector, text_vector)
+                ]
+                if any(avg_vector): # Check if avg_vector is not all zeros
+                    overall_emotion_index = avg_vector.index(max(avg_vector))
+                    result_data["overall_emotion"] = UNIFIED_EMOTIONS[overall_emotion_index]
+                    shared_state['overall_emotion'] = UNIFIED_EMOTIONS[overall_emotion_index] # Update shared_state as well
+                else:
+                    result_data["overall_emotion"] = "neutral" # Default if vectors are zero
+                    shared_state['overall_emotion'] = "neutral"
+            else:
+                 result_data["overall_emotion"] = "neutral" # Default if any vector is missing
+                 shared_state['overall_emotion'] = "neutral"
+
             # Convert the entire result_data structure to be JSON serializable
             serializable_result_data = convert_to_serializable(result_data)
 
