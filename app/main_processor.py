@@ -193,9 +193,21 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     global shared_state, model, text_classifier, audio_feature_extractor, audio_classifier, face_cascade
     # Ensure ser_model and ser_processor are correctly scoped or passed if needed by audio_processing_loop
     # Depending on their initialization, they might need to be global or passed differently.
-    # For now, assuming they are initialized and available to audio_processing_loop as intended.
     
     logger.info(f"Detect_emotion main started with camera_index: {camera_index}")
+
+    # Define project root and model cache directories
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir) # This assumes 'app' is one level down from project root
+    
+    whisper_cache_dir = os.path.join(project_root, "models", "whisper_cache")
+    transformers_cache_dir = os.path.join(project_root, "models", "transformers_cache")
+
+    # Create cache directories if they don't exist
+    os.makedirs(whisper_cache_dir, exist_ok=True)
+    os.makedirs(transformers_cache_dir, exist_ok=True)
+    logger.info(f"Whisper models will be cached in: {whisper_cache_dir}")
+    logger.info(f"Transformers models will be cached in: {transformers_cache_dir}")
     
     # Store the queue and stop event
     shared_state['emotion_queue'] = emotion_queue
@@ -218,7 +230,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     print("Initializing Whisper model...")
     try:
         # Use base model instead of tiny for better accuracy
-        model = whisper.load_model("base")
+        model = whisper.load_model("base", download_root=whisper_cache_dir)
         # Verify whisper model loaded correctly
         if model is None:
             logger.error("Failed to initialize Whisper model")
@@ -238,7 +250,8 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     try:
         text_classifier = pipeline("text-classification", 
                                 model="j-hartmann/emotion-english-distilroberta-base", 
-                                top_k=None)
+                                top_k=None,
+                                cache_dir=transformers_cache_dir)
     except Exception as e:
         logger.error(f"Error loading text classifier: {e}")
         return  # Exit if we can't load the classifier
@@ -253,8 +266,8 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
         # audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_name) # Original
         # audio_classifier = AutoModelForAudioClassification.from_pretrained(model_name) # Original
         
-        audio_feature_extractor = AutoFeatureExtractor.from_pretrained(ser_model_name)
-        audio_classifier = AutoModelForAudioClassification.from_pretrained(ser_model_name)
+        audio_feature_extractor = AutoFeatureExtractor.from_pretrained(ser_model_name, cache_dir=transformers_cache_dir)
+        audio_classifier = AutoModelForAudioClassification.from_pretrained(ser_model_name, cache_dir=transformers_cache_dir)
         
         # Make sure both are on the same device
         audio_classifier = audio_classifier.to(device)

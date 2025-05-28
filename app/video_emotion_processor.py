@@ -1,5 +1,4 @@
 import cv2
-from deepface import DeepFace
 import os
 import random
 import shutil
@@ -7,11 +6,25 @@ import tempfile
 import time
 import logging # Added import
 
+# Set up environment for DeepFace model caching
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+deepface_cache_dir = os.path.join(project_root, "models", "deepface_cache")
+
+# Set the DEEPFACE_HOME environment variable
+os.environ['DEEPFACE_HOME'] = deepface_cache_dir
+
+# Now import DeepFace, it should use the DEEPFACE_HOME we just set.
+from deepface import DeepFace
+
+# Create the DeepFace cache directory if it doesn't exist
+os.makedirs(deepface_cache_dir, exist_ok=True)
+
 from constants import FACIAL_TO_UNIFIED
 
 # Initialize a local logger for this module
 logger = logging.getLogger(__name__)
-
+logger.info(f"DeepFace models will be cached in: {deepface_cache_dir}")
 
 def init_webcam(preferred_index=0, try_fallbacks=True):
 	"""Initialize webcam with fallback options"""
