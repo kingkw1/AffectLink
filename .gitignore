@@ -2,6 +2,7 @@
 TaskBreakdown.md
 .venv/*
 references/*
+models/*
 
 *.ipynb_checkpoints/*
 *.ipynb_checkpoints
