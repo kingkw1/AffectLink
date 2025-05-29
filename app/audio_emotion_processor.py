@@ -152,6 +152,123 @@ def transcribe_audio_whisper(audio_path, whisper_model):
         return None
 
 
+def process_audio_chunk_from_file(audio_chunk_data, audio_sample_rate, whisper_model, text_emotion_classifier, audio_feature_extractor, audio_emotion_classifier):
+    """
+    Processes a raw audio data chunk from a file, performs transcription,
+    and detects both text and audio emotions.
+
+    Args:
+        audio_chunk_data (np.ndarray): A NumPy array (float32) representing the audio segment.
+        audio_sample_rate (int): The sample rate of the audio data.
+        whisper_model: The loaded Whisper transcription model.
+        text_emotion_classifier: The loaded Hugging Face pipeline for text sentiment/emotion.
+        audio_feature_extractor: The loaded Hugging Face AutoFeatureExtractor for audio.
+        audio_emotion_classifier: The loaded Hugging Face AutoModelForAudioClassification for audio.
+
+    Returns:
+        tuple: (transcribed_text, text_emotion_data, audio_emotion_data)
+               - transcribed_text (str): The transcribed text from the audio chunk.
+               - text_emotion_data (tuple): (emotion_str, confidence_float) for text.
+               - audio_emotion_data (tuple): (emotion_str, confidence_float) for audio.
+    """
+    transcribed_text = ""
+    text_emotion_data = ("unknown", 0.0)
+    audio_emotion_data = ("unknown", 0.0)
+    temp_audio_file = None
+
+    try:
+        # 1. Temporarily save the audio_chunk_data to a WAV file
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpfile:
+            temp_audio_file = tmpfile.name
+            sf.write(temp_audio_file, audio_chunk_data, audio_sample_rate)
+        
+        # 2. Transcribe audio
+        transcribed_text = transcribe_audio_whisper(temp_audio_file, whisper_model)
+
+        # 3. Perform text emotion classification
+        if transcribed_text:
+            try:
+                # The pipeline returns a list of dictionaries, e.g., [{'label': 'neutral', 'score': 0.67}]
+                text_results = text_emotion_classifier(transcribed_text)
+                if text_results and isinstance(text_results, list) and len(text_results) > 0:
+                    dominant_label = text_results[0]['label']
+                    confidence = text_results[0]['score']
+
+                    # Map to unified emotion
+                    unified_emotion = TEXT_TO_UNIFIED.get(dominant_label)
+                    if unified_emotion:
+                        text_emotion_data = (unified_emotion, float(confidence))
+                    else:
+                        logger.warning(f"Text emotion label '{dominant_label}' not found in TEXT_TO_UNIFIED map.")
+                else:
+                    logger.warning(f"Text classifier output format unexpected or empty for text: '{transcribed_text}' - Output: {text_results}")
+            except Exception as e:
+                logger.error(f"Error during text emotion classification for text: '{transcribed_text}' - {e}", exc_info=True)
+        else:
+            logger.info("No text transcribed for emotion analysis.")
+
+        # 4. Perform audio emotion classification
+        # Resample audio to 16kHz if necessary, as the model expects 16kHz
+        target_sr_audio_model = 16000
+        if audio_sample_rate != target_sr_audio_model:
+            logger.info(f"Resampling audio from {audio_sample_rate}Hz to {target_sr_audio_model}Hz for audio emotion classification.")
+            audio_data_resampled = librosa.resample(y=audio_chunk_data, orig_sr=audio_sample_rate, target_sr=target_sr_audio_model)
+            current_audio_data = audio_data_resampled
+            current_audio_sample_rate = target_sr_audio_model
+        else:
+            current_audio_data = audio_chunk_data
+            current_audio_sample_rate = audio_sample_rate
+
+        # Ensure current_audio_data is float32, as expected by feature extractor
+        if current_audio_data.dtype != np.float32:
+            current_audio_data = current_audio_data.astype(np.float32)
+
+        with torch.no_grad():
+            inputs = audio_feature_extractor(
+                raw_speech=current_audio_data,
+                sampling_rate=current_audio_sample_rate,
+                return_tensors="pt"
+            )
+            # Ensure inputs are moved to the same device as the model
+            if torch.cuda.is_available():
+                inputs = {k: v.to("cuda") for k, v in inputs.items()}
+                audio_emotion_classifier.to("cuda")
+
+            outputs = audio_emotion_classifier(**inputs)
+            logits = outputs.logits
+            
+            # Get probabilities
+            probabilities = torch.softmax(logits, dim=-1)[0]
+            
+            # Get the predicted emotion
+            predicted_id = torch.argmax(probabilities).item()
+            predicted_label = audio_emotion_classifier.config.id2label[predicted_id]
+            confidence = probabilities[predicted_id].item()
+
+            # Map to unified emotion
+            unified_emotion = SER_TO_UNIFIED.get(predicted_label)
+            if unified_emotion:
+                audio_emotion_data = (unified_emotion, float(confidence))
+            else:
+                logger.warning(f"Audio emotion label '{predicted_label}' not found in SER_TO_UNIFIED map.")
+
+    except Exception as e:
+        logger.error(f"Error during audio emotion classification: {e}", exc_info=True)
+        # Revert to unknown if an error occurs
+        audio_emotion_data = ("unknown", 0.0)
+        text_emotion_data = ("unknown", 0.0) # Also set text emotion to unknown if audio processing failed
+
+    finally:
+        # Clean up temporary audio file
+        if temp_audio_file and os.path.exists(temp_audio_file):
+            try:
+                os.remove(temp_audio_file)
+            except OSError as e:
+                logger.error(f"Error removing temporary audio file {temp_audio_file}: {e}")
+
+    return transcribed_text, text_emotion_data, audio_emotion_data
+
+
 def analyze_audio_emotion_full(audio_path, ser_model, ser_processor):
     """
     Get full detailed audio emotion analysis
