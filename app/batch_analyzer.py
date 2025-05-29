@@ -10,8 +10,6 @@ import torch
 import whisper
 from transformers import pipeline, AutoModelForAudioClassification, AutoFeatureExtractor
 import logging
-import json # For consistency calculation
-import math # For cosine similarity
 
 # Add the project root to sys.path to ensure local modules are found
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -127,6 +125,96 @@ def calculate_consistency_level(facial_emotion, text_emotion, audio_emotion, fac
     else: # 3 or more unique emotions among the available ones
         return "Low Consistency"
 
+def process_audio(input_file_path):
+    logger.info(f"Processing audio from file: {input_file_path}")
+    try:
+        # Load entire audio file
+        audio_data, current_audio_sample_rate = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
+        
+        total_samples = len(audio_data)
+        samples_per_chunk = int(AUDIO_CHUNK_SIZE * current_audio_sample_rate)
+        
+        for i in range(0, total_samples, samples_per_chunk):
+            audio_chunk = audio_data[i : i + samples_per_chunk]
+            
+            # If the chunk is too small at the end, pad it or skip
+            if len(audio_chunk) < samples_per_chunk and i + samples_per_chunk < total_samples:
+                # Pad the last chunk if it's too short for the model to process effectively
+                padding_needed = samples_per_chunk - len(audio_chunk)
+                audio_chunk = np.pad(audio_chunk, (0, padding_needed), mode='constant')
+            elif len(audio_chunk) == 0:
+                continue # Skip empty chunks
+
+            # Process the audio chunk using the dedicated processor
+            transcribed_text, text_emotion_data, audio_emotion_data = \
+                process_audio_chunk_from_file(
+                    audio_chunk, current_audio_sample_rate, 
+                    whisper_model, text_emotion_classifier, 
+                    audio_feature_extractor, audio_emotion_classifier
+                )
+            
+            # Calculate consistency (simplified for batch)
+            # In a real scenario, you might want more sophisticated score vectors here.
+            facial_emotion_dummy = ("unknown", 0.0) # No facial emotion for audio-only
+            consistency_level = calculate_consistency_level(
+                facial_emotion_dummy, text_emotion_data, audio_emotion_data
+            )
+
+            start_time_chunk_sec = i / current_audio_sample_rate
+            end_time_chunk_sec = (i + len(audio_chunk)) / current_audio_sample_rate
+
+            logger.info(f"[{start_time_chunk_sec:.2f}s - {end_time_chunk_sec:.2f}s] Audio Chunk Results:")
+            logger.info(f"  Transcribed Text: \"{transcribed_text}\"")
+            logger.info(f"  Text Emotion: {text_emotion_data[0]} (Conf: {text_emotion_data[1]:.2f})")
+            logger.info(f"  Audio Emotion: {audio_emotion_data[0]} (Conf: {audio_emotion_data[1]:.2f})")
+            logger.info(f"  Consistency: {consistency_level}")
+        
+        logger.info(f"Finished processing audio file: {input_file_path}")
+    except Exception as e:
+        logger.error(f"Error processing audio file {input_file_path}: {e}", exc_info=True)
+
+def process_video(input_file_path):
+    logger.info(f"Processing video from file: {input_file_path}")
+    cap = cv2.VideoCapture(input_file_path)
+    if not cap.isOpened():
+        logger.error(f"Error: Could not open video file {input_file_path}")
+        return
+
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break # End of video
+
+        timestamp_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0 # Time in seconds
+
+        facial_emotion = ("unknown", 0.0)
+        
+        try:                  
+            facial_emotion_data, raw_emotion_scores = get_facial_emotion_from_frame(frame)
+                    
+            if facial_emotion_data and facial_emotion_data[0] != "unknown" and facial_emotion_data[0] != "error":
+                dominant_emotion, confidence = facial_emotion_data
+                confidence = max(raw_emotion_scores.values(), default=0.0) # Get max confidence from scores
+
+                # Map to unified emotion
+                unified_emotion = FACIAL_TO_UNIFIED.get(dominant_emotion)
+                if unified_emotion:
+                    facial_emotion = (unified_emotion, float(confidence))
+                else:
+                    logger.warning(f"Facial emotion label '{dominant_emotion}' not found in FACIAL_TO_UNIFIED map.")                
+
+        except Exception as e:
+            logger.debug(f"No face detected or error in facial analysis for frame {frame_idx}: {e}")
+            facial_emotion = ("unknown", 0.0)
+
+        logger.info(f"[{timestamp_sec:.2f}s] Frame {frame_idx}: Facial Emotion: {facial_emotion[0]} (Conf: {facial_emotion[1]:.2f})")
+        frame_idx += 1
+    
+    cap.release()
+    logger.info(f"Finished processing video file: {input_file_path}")
+
+
 def process_media_file(input_file_path):
     """
     Processes a video or audio file for emotion analysis and prints results.
@@ -136,94 +224,21 @@ def process_media_file(input_file_path):
     load_models() # Ensure models are loaded
     
     if file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
-        logger.info(f"Processing video file: {input_file_path}")
-        cap = cv2.VideoCapture(input_file_path)
-        if not cap.isOpened():
-            logger.error(f"Error: Could not open video file {input_file_path}")
-            return
+        # process_video(input_file_path)
 
-        frame_idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break # End of video
-
-            timestamp_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0 # Time in seconds
-
-            facial_emotion = ("unknown", 0.0)
-            
-            try:                  
-                facial_emotion_data, raw_emotion_scores = get_facial_emotion_from_frame(frame)
-                     
-                if facial_emotion_data and facial_emotion_data[0] != "unknown" and facial_emotion_data[0] != "error":
-                    dominant_emotion, confidence = facial_emotion_data
-                    confidence = max(raw_emotion_scores.values(), default=0.0) # Get max confidence from scores
-
-                    # Map to unified emotion
-                    unified_emotion = FACIAL_TO_UNIFIED.get(dominant_emotion)
-                    if unified_emotion:
-                        facial_emotion = (unified_emotion, float(confidence))
-                    else:
-                        logger.warning(f"Facial emotion label '{dominant_emotion}' not found in FACIAL_TO_UNIFIED map.")                
-
-            except Exception as e:
-                logger.debug(f"No face detected or error in facial analysis for frame {frame_idx}: {e}")
-                facial_emotion = ("unknown", 0.0)
-
-            logger.info(f"[{timestamp_sec:.2f}s] Frame {frame_idx}: Facial Emotion: {facial_emotion[0]} (Conf: {facial_emotion[1]:.2f})")
-            frame_idx += 1
-        
-        cap.release()
-        logger.info(f"Finished processing video file: {input_file_path}")
+        # Check if the video has audio
+        try:
+            audio_data, sample_rate = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
+            if len(audio_data) > 0:
+                logger.info(f"Audio track found in video {input_file_path}. Processing audio...")
+                process_audio(input_file_path)
+            else:
+                logger.warning(f"No audio track found in video {input_file_path}.")
+        except Exception as e:
+            logger.error(f"Error loading audio from video file {input_file_path}: {e}", exc_info=True)
 
     elif file_extension in ['.wav', '.mp3', '.flac', '.m4a', '.ogg']:
-        logger.info(f"Processing audio file: {input_file_path}")
-        try:
-            # Load entire audio file
-            audio_data, current_audio_sample_rate = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
-            
-            total_samples = len(audio_data)
-            samples_per_chunk = int(AUDIO_CHUNK_SIZE * current_audio_sample_rate)
-            
-            for i in range(0, total_samples, samples_per_chunk):
-                audio_chunk = audio_data[i : i + samples_per_chunk]
-                
-                # If the chunk is too small at the end, pad it or skip
-                if len(audio_chunk) < samples_per_chunk and i + samples_per_chunk < total_samples:
-                    # Pad the last chunk if it's too short for the model to process effectively
-                    padding_needed = samples_per_chunk - len(audio_chunk)
-                    audio_chunk = np.pad(audio_chunk, (0, padding_needed), mode='constant')
-                elif len(audio_chunk) == 0:
-                    continue # Skip empty chunks
-
-                # Process the audio chunk using the dedicated processor
-                transcribed_text, text_emotion_data, audio_emotion_data = \
-                    process_audio_chunk_from_file(
-                        audio_chunk, current_audio_sample_rate, 
-                        whisper_model, text_emotion_classifier, 
-                        audio_feature_extractor, audio_emotion_classifier
-                    )
-                
-                # Calculate consistency (simplified for batch)
-                # In a real scenario, you might want more sophisticated score vectors here.
-                facial_emotion_dummy = ("unknown", 0.0) # No facial emotion for audio-only
-                consistency_level = calculate_consistency_level(
-                    facial_emotion_dummy, text_emotion_data, audio_emotion_data
-                )
-
-                start_time_chunk_sec = i / current_audio_sample_rate
-                end_time_chunk_sec = (i + len(audio_chunk)) / current_audio_sample_rate
-
-                logger.info(f"[{start_time_chunk_sec:.2f}s - {end_time_chunk_sec:.2f}s] Audio Chunk Results:")
-                logger.info(f"  Transcribed Text: \"{transcribed_text}\"")
-                logger.info(f"  Text Emotion: {text_emotion_data[0]} (Conf: {text_emotion_data[1]:.2f})")
-                logger.info(f"  Audio Emotion: {audio_emotion_data[0]} (Conf: {audio_emotion_data[1]:.2f})")
-                logger.info(f"  Consistency: {consistency_level}")
-            
-            logger.info(f"Finished processing audio file: {input_file_path}")
-
-        except Exception as e:
-            logger.error(f"Error processing audio file {input_file_path}: {e}", exc_info=True)
+        process_audio(input_file_path)
 
     else:
         logger.error(f"Unsupported file type: {file_extension} for {input_file_path}")
