@@ -12,12 +12,14 @@ import torch
 import tempfile
 import logging  # Added for local logger
 
-from constants import SER_TO_UNIFIED, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
+from constants import SER_TO_UNIFIED, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS, AUDIO_CHUNK_SIZE, AUDIO_SAMPLE_RATE
 # Removed: from main_processor import logger, shared_state
 
 # Local logger for this module
 logger = logging.getLogger(__name__)
 
+# Initialize audio buffer with a fixed size
+audio_buffer = deque(maxlen=AUDIO_CHUNK_SIZE * AUDIO_SAMPLE_RATE)
 
 def transcribe_audio_whisper(audio_path, whisper_model):
     """
@@ -354,14 +356,6 @@ def _create_and_normalize_unified_scores(raw_scores_input, mapping_dict, target_
     # If total_unified_score is 0, unified_scores will remain all zeros.
 
     return unified_scores
-
-
-# Audio recording settings
-audio_sample_rate = 16000 # Changed from 44100 to 16000
-audio_duration = 5   # Record 5 seconds at a time
-
-
-audio_buffer = deque(maxlen=audio_duration * audio_sample_rate)
 
 
 def moving_average(scores):
@@ -730,13 +724,13 @@ def record_audio(shared_state):
         stream = sd.InputStream(
             callback=audio_callback,
             channels=1,
-            samplerate=audio_sample_rate,
-            blocksize=int(audio_sample_rate * 0.1)  # 100ms blocks
+            samplerate=AUDIO_SAMPLE_RATE,
+            blocksize=int(AUDIO_SAMPLE_RATE * 0.1)  # 100ms blocks
         )
 
         # Start recording
         with stream:
-            logger.info(f"Audio recording started with sample rate {audio_sample_rate}Hz")
+            logger.info(f"Audio recording started with sample rate {AUDIO_SAMPLE_RATE}Hz")
 
             # Keep recording until stop flag is set
             while True:
