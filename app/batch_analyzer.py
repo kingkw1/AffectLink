@@ -186,6 +186,94 @@ def process_video(input_file_path, frame_processing_rate=1):
     return video_results
 
 
+def _convert_scores_to_unified_vector(scores_dict, unified_emotions_list):
+    """
+    Converts a dictionary of emotion scores to a consistent vector (list of floats)
+    based on a predefined order of unified emotions. Missing emotions get a score of 0.0.
+    """
+    vector = [0.0] * len(unified_emotions_list)
+    if not scores_dict:
+        return vector
+
+    # DeepFace returns np.float32, ensure conversion to float for consistency
+    for i, emotion in enumerate(unified_emotions_list):
+        # Ensure we only use emotions present in the scores_dict and handle np.float32
+        if emotion in scores_dict:
+            score = scores_dict[emotion]
+            # Convert numpy types to native Python floats if necessary
+            if isinstance(score, np.float32):
+                vector[i] = float(score)
+            else:
+                vector[i] = score
+    return vector
+
+def prepare_data_for_similarity_calculation(video_results, audio_results):
+    """
+    Aligns video and audio/text emotion results by time and prepares
+    them into vectors suitable for cosine similarity calculation.
+    
+    Args:
+        video_results (list): List of dictionaries from process_video.
+        audio_results (list): List of dictionaries from process_audio.
+        
+    Returns:
+        list: A list of dictionaries, where each dictionary contains:
+              'timestamp_start_sec': start time of the chunk
+              'timestamp_end_sec': end time of the chunk
+              'facial_vector': emotion vector for facial data in this chunk
+              'audio_vector': emotion vector for audio data in this chunk
+              'text_vector': emotion vector for text data in this chunk
+              (and potentially other relevant data like transcribed_text)
+    """
+    aligned_data = []
+
+    for audio_chunk_result in audio_results:
+        audio_chunk_start_time = audio_chunk_result['start_time_sec']
+        audio_chunk_end_time = audio_chunk_result['end_time_sec']
+
+        # 1. Aggregate facial emotion scores for frames within this audio chunk
+        facial_scores_in_chunk = []
+        for frame_result in video_results:
+            frame_timestamp = frame_result['timestamp_sec']
+            if audio_chunk_start_time <= frame_timestamp < audio_chunk_end_time:
+                # Only add if full scores are available and not empty
+                if frame_result.get('facial_emotion_full_scores'):
+                    facial_scores_in_chunk.append(frame_result['facial_emotion_full_scores'])
+        
+        # Calculate average facial emotion scores for the chunk
+        # Initialize a dictionary for sum of scores for each unified emotion
+        avg_facial_scores = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
+        
+        if facial_scores_in_chunk:
+            for scores_dict in facial_scores_in_chunk:
+                for emotion, score in scores_dict.items():
+                    unified_emotion = FACIAL_TO_UNIFIED.get(emotion)
+                    if unified_emotion:
+                        # Sum scores, ensuring numpy types are converted to float
+                        avg_facial_scores[unified_emotion] += float(score)
+            
+            # Divide by number of frames to get average
+            num_frames = len(facial_scores_in_chunk)
+            for emotion in avg_facial_scores:
+                avg_facial_scores[emotion] /= num_frames
+        
+        # 2. Convert aggregated scores and chunk-based scores into unified vectors
+        facial_vector = _convert_scores_to_unified_vector(avg_facial_scores, UNIFIED_EMOTIONS)
+        audio_vector = _convert_scores_to_unified_vector(audio_chunk_result.get('audio_emotion_full_scores', {}), UNIFIED_EMOTIONS)
+        text_vector = _convert_scores_to_unified_vector(audio_chunk_result.get('text_emotion_full_scores', {}), UNIFIED_EMOTIONS)
+
+        aligned_data.append({
+            'timestamp_start_sec': audio_chunk_start_time,
+            'timestamp_end_sec': audio_chunk_end_time,
+            'facial_vector': facial_vector,
+            'audio_vector': audio_vector,
+            'text_vector': text_vector,
+            'transcribed_text': audio_chunk_result['transcribed_text']
+        })
+    
+    return aligned_data
+
+
 def process_media_file(input_file_path, frame_processing_rate=1):
     """
     Processes a video or audio file for emotion analysis and prints results.
@@ -239,6 +327,31 @@ def main(video_file_path, frame_processing_rate=1): # Renamed parameter for clar
         mlflow.log_param("frame_processing_rate", frame_processing_rate)
 
         video_results, audio_results = process_media_file(video_file_path, frame_processing_rate=frame_processing_rate)
+
+        # --- Data Preparation for Similarity Calculation ---
+        if video_results and audio_results:
+            aligned_for_similarity = prepare_data_for_similarity_calculation(video_results, audio_results)
+            logger.info(f"Prepared {len(aligned_for_similarity)} aligned data chunks for similarity calculation.")
+            
+            # Example of how you would then use this data for calculation
+            for chunk in aligned_for_similarity:
+                avg_similarity = calculate_average_multimodal_similarity(
+                    chunk['facial_vector'],
+                    chunk['audio_vector'],
+                    chunk['text_vector']
+                )
+                logger.info(f"Chunk [{chunk['timestamp_start_sec']:.2f}s - {chunk['timestamp_end_sec']:.2f}s]: Average Similarity = {avg_similarity:.2f}")
+                logger.info(f"  Facial Vector: {chunk['facial_vector']}")
+                logger.info(f"  Audio Vector: {chunk['audio_vector']}")
+                logger.info(f"  Text Vector: {chunk['text_vector']}")
+                logger.info(f"  Transcribed Text: {chunk['transcribed_text']}")
+
+        elif video_results:
+            logger.info("Only video results available. Cannot perform multimodal consistency calculation.")
+        elif audio_results:
+            logger.info("Only audio results available. Cannot perform multimodal consistency calculation.")
+        else:
+            logger.warning("No video or audio results found for consistency calculation.")
 
         # TODO: Implement consistency analysis using video_results and audio_results
         # For now, we just log that the data is available.
