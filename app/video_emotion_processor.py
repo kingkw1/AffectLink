@@ -98,7 +98,7 @@ def get_facial_emotion_from_frame(frame):
 				final_emotion = max(valid_unified_scores, key=valid_unified_scores.get)
 				final_confidence = valid_unified_scores[final_emotion]
 			
-			logger.info(f"Facial emotion (filtered): {final_emotion} ({final_confidence:.2f})")
+			# logger.info(f"Facial emotion (filtered): {final_emotion} ({final_confidence:.2f})")
 			return (final_emotion, final_confidence), raw_emotion_scores
 		else:  # No face detected or analysis list is empty
 			logger.debug("No face detected or analysis empty in get_facial_emotion_from_frame.")

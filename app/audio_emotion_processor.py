@@ -154,121 +154,143 @@ def transcribe_audio_whisper(audio_path, whisper_model):
         return None
 
 
-def process_audio_chunk_from_file(audio_chunk_data, audio_sample_rate, whisper_model, text_emotion_classifier, audio_feature_extractor, audio_emotion_classifier):
+def process_audio_chunk_from_file(
+    audio_chunk_data,  # np.ndarray (float32)
+    audio_sample_rate, # int
+    whisper_model,
+    text_emotion_classifier, # transformers.Pipeline
+    audio_feature_extractor, # transformers.AutoFeatureExtractor
+    audio_emotion_classifier # transformers.AutoModelForAudioClassification
+):
     """
-    Processes a raw audio data chunk from a file, performs transcription,
-    and detects both text and audio emotions.
-
-    Args:
-        audio_chunk_data (np.ndarray): A NumPy array (float32) representing the audio segment.
-        audio_sample_rate (int): The sample rate of the audio data.
-        whisper_model: The loaded Whisper transcription model.
-        text_emotion_classifier: The loaded Hugging Face pipeline for text sentiment/emotion.
-        audio_feature_extractor: The loaded Hugging Face AutoFeatureExtractor for audio.
-        audio_emotion_classifier: The loaded Hugging Face AutoModelForAudioClassification for audio.
-
+    Processes a single audio chunk from data for transcription and emotion analysis.
     Returns:
-        tuple: (transcribed_text, text_emotion_data, audio_emotion_data)
-               - transcribed_text (str): The transcribed text from the audio chunk.
-               - text_emotion_data (tuple): (emotion_str, confidence_float) for text.
-               - audio_emotion_data (tuple): (emotion_str, confidence_float) for audio.
+        A tuple: (transcribed_text, text_emotion_data, audio_emotion_data, text_emotion_full_scores, audio_emotion_full_scores)
     """
     transcribed_text = ""
     text_emotion_data = ("unknown", 0.0)
     audio_emotion_data = ("unknown", 0.0)
-    temp_audio_file = None
+    text_emotion_full_scores = {}
+    audio_emotion_full_scores = {}
+    temp_audio_file_name = None
 
     try:
-        # 1. Temporarily save the audio_chunk_data to a WAV file
+        # 1. Save audio_chunk_data to a temporary WAV file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpfile:
-            temp_audio_file = tmpfile.name
-            sf.write(temp_audio_file, audio_chunk_data, audio_sample_rate)
-        
-        # 2. Transcribe audio
-        transcribed_text = transcribe_audio_whisper(temp_audio_file, whisper_model)
+            temp_audio_file_name = tmpfile.name
+            sf.write(temp_audio_file_name, audio_chunk_data, audio_sample_rate)
+        logger.debug(f"Temporarily saved audio chunk to {temp_audio_file_name}")
 
-        # 3. Perform text emotion classification
-        if transcribed_text:
-            try:
-                # The pipeline returns a list of dictionaries, e.g., [{'label': 'neutral', 'score': 0.67}]
-                text_results = text_emotion_classifier(transcribed_text)
-                if text_results and isinstance(text_results, list) and len(text_results) > 0:
-                    dominant_label = text_results[0]['label']
-                    confidence = text_results[0]['score']
-
-                    # Map to unified emotion
-                    unified_emotion = TEXT_TO_UNIFIED.get(dominant_label)
-                    if unified_emotion:
-                        text_emotion_data = (unified_emotion, float(confidence))
-                    else:
-                        logger.warning(f"Text emotion label '{dominant_label}' not found in TEXT_TO_UNIFIED map.")
-                else:
-                    logger.warning(f"Text classifier output format unexpected or empty for text: '{transcribed_text}' - Output: {text_results}")
-            except Exception as e:
-                logger.error(f"Error during text emotion classification for text: '{transcribed_text}' - {e}", exc_info=True)
-        else:
-            logger.info("No text transcribed for emotion analysis.")
-
-        # 4. Perform audio emotion classification
-        # Resample audio to 16kHz if necessary, as the model expects 16kHz
-        target_sr_audio_model = 16000
-        if audio_sample_rate != target_sr_audio_model:
-            logger.info(f"Resampling audio from {audio_sample_rate}Hz to {target_sr_audio_model}Hz for audio emotion classification.")
-            audio_data_resampled = librosa.resample(y=audio_chunk_data, orig_sr=audio_sample_rate, target_sr=target_sr_audio_model)
-            current_audio_data = audio_data_resampled
-            current_audio_sample_rate = target_sr_audio_model
-        else:
-            current_audio_data = audio_chunk_data
-            current_audio_sample_rate = audio_sample_rate
-
-        # Ensure current_audio_data is float32, as expected by feature extractor
-        if current_audio_data.dtype != np.float32:
-            current_audio_data = current_audio_data.astype(np.float32)
-
-        with torch.no_grad():
-            inputs = audio_feature_extractor(
-                raw_speech=current_audio_data,
-                sampling_rate=current_audio_sample_rate,
-                return_tensors="pt"
-            )
-            # Ensure inputs are moved to the same device as the model
-            if torch.cuda.is_available():
-                inputs = {k: v.to("cuda") for k, v in inputs.items()}
-                audio_emotion_classifier.to("cuda")
-
-            outputs = audio_emotion_classifier(**inputs)
-            logits = outputs.logits
-            
-            # Get probabilities
-            probabilities = torch.softmax(logits, dim=-1)[0]
-            
-            # Get the predicted emotion
-            predicted_id = torch.argmax(probabilities).item()
-            predicted_label = audio_emotion_classifier.config.id2label[predicted_id]
-            confidence = probabilities[predicted_id].item()
-
-            # Map to unified emotion
-            unified_emotion = SER_TO_UNIFIED.get(predicted_label)
-            if unified_emotion:
-                audio_emotion_data = (unified_emotion, float(confidence))
+        # 2. Transcription
+        try:
+            raw_transcription = transcribe_audio_whisper(temp_audio_file_name, whisper_model)
+            if raw_transcription == "RESET_BUFFER" or raw_transcription is None:
+                transcribed_text = ""
             else:
-                logger.warning(f"Audio emotion label '{predicted_label}' not found in SER_TO_UNIFIED map.")
+                transcribed_text = raw_transcription
+        except Exception as e_transcribe:
+            logger.error(f"Error during transcription of {temp_audio_file_name}: {e_transcribe}", exc_info=True)
+            transcribed_text = ""
 
-    except Exception as e:
-        logger.error(f"Error during audio emotion classification: {e}", exc_info=True)
-        # Revert to unknown if an error occurs
-        audio_emotion_data = ("unknown", 0.0)
-        text_emotion_data = ("unknown", 0.0) # Also set text emotion to unknown if audio processing failed
+
+        # 3. Text Emotion Classification
+        if transcribed_text and transcribed_text.strip():
+            try:
+                text_results_outer = text_emotion_classifier(transcribed_text)
+                
+                if text_results_outer and isinstance(text_results_outer, list) and len(text_results_outer) > 0:
+                    text_scores_list = text_results_outer[0] # This is the list of score dicts like [{'label': 'sad', 'score': 0.9}, ...]
+                    if isinstance(text_scores_list, list) and len(text_scores_list) > 0:
+                        text_emotion_full_scores = {item['label']: item['score'] for item in text_scores_list}
+                        
+                        best_text_emotion = max(text_scores_list, key=lambda x: x['score'])
+                        dominant_text_label_raw = best_text_emotion['label']
+                        dominant_text_confidence = best_text_emotion['score']
+                        
+                        unified_text_emotion = TEXT_TO_UNIFIED.get(dominant_text_label_raw.lower(), "unknown")
+                        text_emotion_data = (unified_text_emotion, dominant_text_confidence)
+                    else:
+                        logger.warning(f"Unexpected format for text_scores_list (expected list of dicts): {text_scores_list}")
+                        text_emotion_data = ("unknown", 0.0)
+                else:
+                    logger.warning(f"Unexpected format for text_results_outer (expected list containing list of dicts): {text_results_outer}")
+                    text_emotion_data = ("unknown", 0.0)
+
+            except Exception as e_text:
+                logger.error(f"Error during text emotion classification for text: '{transcribed_text}' - {e_text}", exc_info=True)
+                text_emotion_data = ("error", 0.0)
+        else:
+            text_emotion_data = ("unknown", 0.0) # No text or only whitespace
+
+        # 4. Audio Emotion Classification
+        try:
+            if audio_chunk_data is not None and len(audio_chunk_data) > 0:
+                inputs = audio_feature_extractor(
+                    audio_chunk_data, 
+                    sampling_rate=audio_sample_rate, 
+                    return_tensors="pt",
+                    padding=True # Add padding for short chunks
+                )
+                
+                # Move inputs to the same device as the model
+                model_device = audio_emotion_classifier.device
+                inputs_on_device = {k: v.to(model_device) for k, v in inputs.items()}
+
+                with torch.no_grad():
+                    logits = audio_emotion_classifier(**inputs_on_device).logits
+                
+                probs = torch.softmax(logits, dim=-1).squeeze()
+                
+                model_config_labels = audio_emotion_classifier.config.id2label
+                
+                # Ensure probs is iterable and matches model_config_labels size
+                if probs.ndim == 0: # Single score
+                     probs = probs.unsqueeze(0)
+
+                if len(probs) == len(model_config_labels):
+                    audio_emotion_full_scores = {model_config_labels[i]: probs[i].item() for i in range(len(model_config_labels))}
+                    
+                    if audio_emotion_full_scores:
+                        # Determine dominant raw audio emotion
+                        dominant_audio_label_raw = max(audio_emotion_full_scores, key=audio_emotion_full_scores.get)
+                        audio_confidence_raw = audio_emotion_full_scores[dominant_audio_label_raw]
+
+                        # Map to unified emotion - this part requires careful handling if multiple raw map to one unified
+                        # For simplicity, find the unified emotion corresponding to the most dominant raw emotion
+                        unified_audio_emotion_label = SER_TO_UNIFIED.get(dominant_audio_label_raw.lower(), "unknown")
+                        
+                        # If you need to aggregate scores for unified emotions (e.g. multiple 'anger_x' map to 'anger')
+                        # you would iterate through audio_emotion_full_scores and sum them up for unified labels.
+                        # For now, using the confidence of the top raw mapped emotion.
+                        audio_emotion_data = (unified_audio_emotion_label, audio_confidence_raw)
+                    else:
+                        audio_emotion_data = ("unknown", 0.0)
+                else:
+                    logger.warning(f"Mismatch between number of probabilities ({len(probs)}) and model labels ({len(model_config_labels)}). Skipping audio emotion.")
+                    audio_emotion_data = ("unknown", 0.0)
+            else:
+                audio_emotion_data = ("unknown", 0.0) # No audio data to process
+
+        except Exception as e_audio:
+            logger.error(f"Error during audio emotion analysis: {e_audio}", exc_info=True)
+            audio_emotion_data = ("error", 0.0)
+
+    except Exception as e_main:
+        logger.error(f"Error processing audio chunk from file: {e_main}", exc_info=True)
+        transcribed_text = ""
+        text_emotion_data = ("error", 0.0)
+        audio_emotion_data = ("error", 0.0)
 
     finally:
-        # Clean up temporary audio file
-        if temp_audio_file and os.path.exists(temp_audio_file):
+        # 5. Cleanup temporary file
+        if temp_audio_file_name and os.path.exists(temp_audio_file_name):
             try:
-                os.remove(temp_audio_file)
-            except OSError as e:
-                logger.error(f"Error removing temporary audio file {temp_audio_file}: {e}")
+                os.remove(temp_audio_file_name)
+                logger.debug(f"Successfully deleted temporary audio file {temp_audio_file_name}")
+            except Exception as e_delete:
+                logger.warning(f"Could not delete temporary audio file {temp_audio_file_name}: {e_delete}")
 
-    return transcribed_text, text_emotion_data, audio_emotion_data
+    return transcribed_text, text_emotion_data, audio_emotion_data, text_emotion_full_scores, audio_emotion_full_scores
 
 
 def analyze_audio_emotion_full(audio_path, ser_model, ser_processor):

@@ -89,48 +89,46 @@ def load_models():
 def process_audio(input_file_path):
     logger.info(f"Processing audio from file: {input_file_path}")
     audio_results = []
-    try:
-        # Load entire audio file
-        audio_data, current_audio_sample_rate = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
+    # Load entire audio file
+    audio_data, current_audio_sample_rate = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
+    
+    total_samples = len(audio_data)
+    samples_per_chunk = int(AUDIO_CHUNK_SIZE * current_audio_sample_rate)
+    
+    for i in range(0, total_samples, samples_per_chunk):
+        audio_chunk = audio_data[i : i + samples_per_chunk]
         
-        total_samples = len(audio_data)
-        samples_per_chunk = int(AUDIO_CHUNK_SIZE * current_audio_sample_rate)
-        
-        for i in range(0, total_samples, samples_per_chunk):
-            audio_chunk = audio_data[i : i + samples_per_chunk]
-            
-            if len(audio_chunk) < samples_per_chunk and i + samples_per_chunk < total_samples:
-                padding_needed = samples_per_chunk - len(audio_chunk)
-                audio_chunk = np.pad(audio_chunk, (0, padding_needed), mode='constant')
-            elif len(audio_chunk) == 0:
-                continue
+        if len(audio_chunk) < samples_per_chunk and i + samples_per_chunk < total_samples:
+            # Optional: Pad the last chunk if it's shorter and not the very end of the file
+            # This might be useful if the model expects fixed-size inputs, but Whisper handles variable lengths.
+            # padding_needed = samples_per_chunk - len(audio_chunk)
+            # audio_chunk = np.pad(audio_chunk, (0, padding_needed), mode='constant')
+            pass # Whisper handles variable length, so padding might not be strictly necessary
+        elif len(audio_chunk) == 0:
+            continue
 
-            transcribed_text, text_emotion_data, audio_emotion_data = \
-                process_audio_chunk_from_file(
-                    audio_chunk, current_audio_sample_rate, 
-                    whisper_model, text_emotion_classifier, 
-                    audio_feature_extractor, audio_emotion_classifier
-                )
+        # Call the updated function that now returns 5 values
+        transcribed_text, text_emotion_data, audio_emotion_data, text_full_scores, audio_full_scores = \
+            process_audio_chunk_from_file(
+                audio_chunk, current_audio_sample_rate, 
+                whisper_model, text_emotion_classifier, 
+                audio_feature_extractor, audio_emotion_classifier
+            )
 
-            start_time_chunk_sec = i / current_audio_sample_rate
-            end_time_chunk_sec = (i + len(audio_chunk)) / current_audio_sample_rate
+        start_time_chunk_sec = i / current_audio_sample_rate
+        end_time_chunk_sec = (i + len(audio_chunk)) / current_audio_sample_rate
 
-            # NOTE: process_audio_chunk_from_file currently does not return full score dictionaries.
-            # Placeholder empty dicts are used for 'text_emotion_full_scores' and 'audio_emotion_full_scores'.
-            # This may need to be updated if process_audio_chunk_from_file is modified to provide them.
-            audio_results.append({
-                'start_time_sec': start_time_chunk_sec,
-                'end_time_sec': end_time_chunk_sec,
-                'transcribed_text': transcribed_text,
-                'text_emotion': text_emotion_data,
-                'audio_emotion': audio_emotion_data,
-                'text_emotion_full_scores': {}, # Placeholder
-                'audio_emotion_full_scores': {}  # Placeholder
-            })
-        
-        logger.info(f"Finished processing audio file: {input_file_path}. Collected {len(audio_results)} audio segments.")
-    except Exception as e:
-        logger.error(f"Error processing audio file {input_file_path}: {e}", exc_info=True)
+        audio_results.append({
+            'start_time_sec': start_time_chunk_sec,
+            'end_time_sec': end_time_chunk_sec,
+            'transcribed_text': transcribed_text,
+            'text_emotion': text_emotion_data,
+            'audio_emotion': audio_emotion_data,
+            'text_emotion_full_scores': text_full_scores, # Now correctly populated
+            'audio_emotion_full_scores': audio_full_scores  # Now correctly populated
+        })
+    
+    logger.info(f"Finished processing audio file: {input_file_path}. Collected {len(audio_results)} audio segments.")
     return audio_results
 
 def process_video(input_file_path):
@@ -196,18 +194,15 @@ def process_media_file(input_file_path):
     if file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
         video_results = process_video(input_file_path)
 
-        try:
-            # Attempt to load audio from the video file to check if it exists
-            # We don't need to store the data here if process_audio will load it again,
-            # but it's a quick check. Alternatively, process_audio could take raw data.
-            temp_audio_data, _ = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
-            if len(temp_audio_data) > 0:
-                logger.info(f"Video file {input_file_path} contains audio. Processing audio component.")
-                audio_results = process_audio(input_file_path) # Process the same file for audio
-            else:
-                logger.info(f"Video file {input_file_path} does not contain a significant audio component.")
-        except Exception as e:
-            logger.warning(f"Could not load or process audio from video file {input_file_path}: {e}", exc_info=True)
+        # Attempt to load audio from the video file to check if it exists
+        # We don't need to store the data here if process_audio will load it again,
+        # but it's a quick check. Alternatively, process_audio could take raw data.
+        temp_audio_data, _ = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
+        if len(temp_audio_data) > 0:
+            logger.info(f"Video file {input_file_path} contains audio. Processing audio component.")
+            audio_results = process_audio(input_file_path) # Process the same file for audio
+        else:
+            logger.info(f"Video file {input_file_path} does not contain a significant audio component.")
 
     elif file_extension in ['.wav', '.mp3', '.flac', '.m4a', '.ogg']:
         audio_results = process_audio(input_file_path)
