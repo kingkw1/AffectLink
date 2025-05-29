@@ -68,6 +68,47 @@ def init_webcam(preferred_index=0, try_fallbacks=True):
 	return cap
 
 
+def get_facial_emotion_from_frame(frame):
+	"""Analyzes a single video frame to detect facial emotion."""
+	try:
+		analysis = DeepFace.analyze(
+			frame,
+			actions=['emotion'],
+			enforce_detection=False,  # Don't error if no face, just return empty
+			silent=True  # Suppress DeepFace's own console output
+		)
+
+		# DeepFace returns a list of dicts, one for each detected face
+		if analysis and isinstance(analysis, list) and len(analysis) > 0:
+			first_face = analysis[0]  # Process the first detected face
+			# Get all raw scores from DeepFace, normalized to 0-1
+			raw_emotion_scores = {k: v / 100.0 for k, v in first_face['emotion'].items()}
+
+			valid_unified_scores = {}
+			for raw_emotion, raw_score in raw_emotion_scores.items():
+				unified_map_target = FACIAL_TO_UNIFIED.get(raw_emotion)
+				# Only consider emotions that map to a valid UNIFIED_EMOTION
+				if unified_map_target is not None:
+					valid_unified_scores[unified_map_target] = max(valid_unified_scores.get(unified_map_target, 0.0), raw_score)
+			
+			final_emotion = "unknown"
+			final_confidence = 0.0
+			if valid_unified_scores and any(s > 0 for s in valid_unified_scores.values()):
+				# Find the dominant emotion from the filtered valid_unified_scores
+				final_emotion = max(valid_unified_scores, key=valid_unified_scores.get)
+				final_confidence = valid_unified_scores[final_emotion]
+			
+			logger.info(f"Facial emotion (filtered): {final_emotion} ({final_confidence:.2f})")
+			return (final_emotion, final_confidence), raw_emotion_scores
+		else:  # No face detected or analysis list is empty
+			logger.debug("No face detected or analysis empty in get_facial_emotion_from_frame.")
+			return ("unknown", 0.0), {}
+
+	except Exception as e:
+		logger.error(f"Error during facial emotion analysis in get_facial_emotion_from_frame: {e}", exc_info=True)
+		return ("unknown", 0.0), {}
+
+
 # Updated function signature
 def process_video(shared_state, video_lock, video_started_event):
 	"""Process video frames for facial emotion detection."""
