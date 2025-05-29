@@ -131,15 +131,20 @@ def process_audio(input_file_path):
     logger.info(f"Finished processing audio file: {input_file_path}. Collected {len(audio_results)} audio segments.")
     return audio_results
 
-def process_video(input_file_path):
-    logger.info(f"Processing video from file: {input_file_path}")
+def process_video(input_file_path, frame_processing_rate=1):
+    logger.info(f"Processing video from file: {input_file_path} with frame_processing_rate={frame_processing_rate}")
     video_results = []
     cap = cv2.VideoCapture(input_file_path)
     if not cap.isOpened():
         logger.error(f"Error: Could not open video file {input_file_path}")
         return video_results
 
+    if frame_processing_rate <= 0:
+        logger.warning("frame_processing_rate must be a positive integer. Defaulting to 1.")
+        frame_processing_rate = 1
+
     frame_idx = 0
+    processed_frame_count = 0
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -147,40 +152,41 @@ def process_video(input_file_path):
 
         timestamp_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
 
-        current_facial_emotion = ("unknown", 0.0)
-        current_facial_scores = {}
+        if frame_idx % frame_processing_rate == 0:
+            current_facial_emotion = ("unknown", 0.0)
+            current_facial_scores = {}
+            
+            try:                  
+                facial_emotion_data, raw_emotion_scores = get_facial_emotion_from_frame(frame)
+
+                if facial_emotion_data and facial_emotion_data[0] != "unknown" and facial_emotion_data[0] != "error":
+                    current_facial_emotion = facial_emotion_data
+                    current_facial_scores = raw_emotion_scores
+                    logger.info(f"[{timestamp_sec:.2f}s] Frame {frame_idx} (Processed): Facial emotion: {facial_emotion_data[0]} ({facial_emotion_data[1]:.2f})")
+                elif facial_emotion_data: 
+                    current_facial_emotion = facial_emotion_data
+                    current_facial_scores = raw_emotion_scores if raw_emotion_scores else {}
+                # If facial_emotion_data is None, defaults remain ("unknown", 0.0) and {}
+
+            except Exception as e:
+                logger.debug(f"Error in facial analysis for frame {frame_idx} at {timestamp_sec:.2f}s: {e}")
+                # Defaults current_facial_emotion = ("unknown", 0.0), current_facial_scores = {} are kept
+
+            video_results.append({
+                'timestamp_sec': timestamp_sec,
+                'facial_emotion': current_facial_emotion,
+                'facial_emotion_full_scores': current_facial_scores
+            })
+            processed_frame_count += 1
         
-        try:                  
-            facial_emotion_data, raw_emotion_scores = get_facial_emotion_from_frame(frame)
-
-            if facial_emotion_data and facial_emotion_data[0] != "unknown" and facial_emotion_data[0] != "error":
-                # facial_emotion_data is already (unified_emotion_label, confidence)
-                # raw_emotion_scores is the dictionary of full scores
-                current_facial_emotion = facial_emotion_data
-                current_facial_scores = raw_emotion_scores
-                logger.info(f"[{timestamp_sec:.2f}s] Frame {frame_idx}:  Facial emotion (filtered): {facial_emotion_data[0]} ({facial_emotion_data[1]:.2f})")
-            elif facial_emotion_data: # Handle cases like ("unknown", 0.0) or ("error", 0.0) from get_facial_emotion_from_frame
-                current_facial_emotion = facial_emotion_data
-                current_facial_scores = raw_emotion_scores if raw_emotion_scores else {}
-            # If facial_emotion_data is None, defaults remain ("unknown", 0.0) and {}
-
-        except Exception as e:
-            logger.debug(f"Error in facial analysis for frame {frame_idx} at {timestamp_sec:.2f}s: {e}")
-            # Defaults current_facial_emotion = ("unknown", 0.0), current_facial_scores = {} are kept
-
-        video_results.append({
-            'timestamp_sec': timestamp_sec,
-            'facial_emotion': current_facial_emotion,
-            'facial_emotion_full_scores': current_facial_scores
-        })
         frame_idx += 1
     
     cap.release()
-    logger.info(f"Finished processing video file: {input_file_path}. Collected {len(video_results)} video frames.")
+    logger.info(f"Finished processing video file: {input_file_path}. Read {frame_idx} total frames, processed {processed_frame_count} frames for emotion.")
     return video_results
 
 
-def process_media_file(input_file_path):
+def process_media_file(input_file_path, frame_processing_rate=1):
     """
     Processes a video or audio file for emotion analysis and prints results.
     """
@@ -192,7 +198,7 @@ def process_media_file(input_file_path):
     audio_results = []
 
     if file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
-        video_results = process_video(input_file_path)
+        video_results = process_video(input_file_path, frame_processing_rate=frame_processing_rate)
 
         # Attempt to load audio from the video file to check if it exists
         # We don't need to store the data here if process_audio will load it again,
@@ -220,7 +226,7 @@ def process_media_file(input_file_path):
     # For now, just returning them. Further processing (like consistency analysis) would happen here or be passed on.
     return video_results, audio_results
 
-def main(video_file_path): # Renamed parameter for clarity
+def main(video_file_path, frame_processing_rate=1): # Renamed parameter for clarity
     start_time = time.time()
     
     if not os.path.exists(video_file_path):
@@ -230,8 +236,9 @@ def main(video_file_path): # Renamed parameter for clarity
     with mlflow.start_run(run_name=f"Batch_Analysis_{os.path.basename(video_file_path)}_{time.strftime('%Y%m%d-%H%M%S')}"):
         mlflow.log_param("input_file", video_file_path)
         mlflow.log_param("analysis_type", "Offline Batch")
+        mlflow.log_param("frame_processing_rate", frame_processing_rate)
 
-        video_results, audio_results = process_media_file(video_file_path)
+        video_results, audio_results = process_media_file(video_file_path, frame_processing_rate=frame_processing_rate)
 
         # TODO: Implement consistency analysis using video_results and audio_results
         # For now, we just log that the data is available.
@@ -248,6 +255,7 @@ def main(video_file_path): # Renamed parameter for clarity
 
 if __name__ == '__main__':
 
-    media_file_path = "C:\\Users\\kingk\\OneDrive\\Documents\\Projects\\AffectLink\\data\\WIN_20250529_10_51_21_Pro.mp4"
+    media_file_path = "C:\\\\Users\\\\kingk\\\\OneDrive\\\\Documents\\\\Projects\\\\AffectLink\\\\data\\\\WIN_20250529_10_51_21_Pro.mp4"
+    desired_frame_processing_rate = 20 # Process every 5th frame
 
-    main(media_file_path)
+    main(media_file_path, frame_processing_rate=desired_frame_processing_rate)
