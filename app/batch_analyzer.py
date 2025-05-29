@@ -25,6 +25,7 @@ from constants import (
 )
 from audio_emotion_processor import process_audio_chunk_from_file
 from video_emotion_processor import get_facial_emotion_from_frame
+from main_processor import calculate_cosine_similarity, get_consistency_level, calculate_average_multimodal_similarity
 
 # Set up environment for DeepFace model caching
 deepface_cache_dir = os.path.join(project_root, "models", "deepface_cache")
@@ -38,9 +39,6 @@ logger = logging.getLogger(__name__)
 
 # Suppress DeepFace logging for cleaner console output during analysis
 logging.getLogger('deepface').setLevel(logging.ERROR)
-
-# --- Hardcoded File Path (UPDATE THIS!) ---
-VIDEO_FILE_PATH = "C:\\Users\\kingk\\OneDrive\\Documents\\Projects\\AffectLink\\data\\WIN_20250529_10_51_21_Pro.mp4"
 
 # --- Model Loading (will be done once in process_media_file) ---
 whisper_model = None
@@ -87,44 +85,6 @@ def load_models():
 
     logger.info("All models loaded.")
 
-
-def calculate_cosine_similarity(vec1, vec2):
-    """Calculates the cosine similarity between two dictionaries of emotion scores."""
-    if not vec1 or not vec2:
-        return 0.0
-
-    # Ensure consistent keys and order
-    all_emotions = sorted(list(set(vec1.keys()) | set(vec2.keys())))
-    v1 = np.array([vec1.get(e, 0.0) for e in all_emotions])
-    v2 = np.array([vec2.get(e, 0.0) for e in all_emotions])
-
-    dot_product = np.dot(v1, v2)
-    norm_v1 = np.linalg.norm(v1)
-    norm_v2 = np.linalg.norm(v2)
-
-    if norm_v1 == 0 or norm_v2 == 0:
-        return 0.0
-    return dot_product / (norm_v1 * norm_v2)
-
-def calculate_consistency_level(facial_emotion, text_emotion, audio_emotion, facial_scores=None, text_scores=None, audio_scores=None):
-    """
-    Calculates a qualitative consistency level based on dominant emotions and optional score vectors.
-    Simplified for batch processing where full score vectors might not always be available for all modalities easily.
-    """
-    emotions = [e[0] for e in [facial_emotion, text_emotion, audio_emotion] if e[0] != "unknown" and e[0] is not None]
-    
-    if not emotions:
-        return "Unknown"
-
-    unique_emotions = set(emotions)
-    
-    if len(unique_emotions) == 1:
-        return "Highly Consistent"
-    elif len(unique_emotions) == 2:
-        return "Moderately Consistent"
-    else: # 3 or more unique emotions among the available ones
-        return "Low Consistency"
-
 def process_audio(input_file_path):
     logger.info(f"Processing audio from file: {input_file_path}")
     try:
@@ -152,13 +112,6 @@ def process_audio(input_file_path):
                     whisper_model, text_emotion_classifier, 
                     audio_feature_extractor, audio_emotion_classifier
                 )
-            
-            # Calculate consistency (simplified for batch)
-            # In a real scenario, you might want more sophisticated score vectors here.
-            facial_emotion_dummy = ("unknown", 0.0) # No facial emotion for audio-only
-            consistency_level = calculate_consistency_level(
-                facial_emotion_dummy, text_emotion_data, audio_emotion_data
-            )
 
             start_time_chunk_sec = i / current_audio_sample_rate
             end_time_chunk_sec = (i + len(audio_chunk)) / current_audio_sample_rate
@@ -167,7 +120,6 @@ def process_audio(input_file_path):
             logger.info(f"  Transcribed Text: \"{transcribed_text}\"")
             logger.info(f"  Text Emotion: {text_emotion_data[0]} (Conf: {text_emotion_data[1]:.2f})")
             logger.info(f"  Audio Emotion: {audio_emotion_data[0]} (Conf: {audio_emotion_data[1]:.2f})")
-            logger.info(f"  Consistency: {consistency_level}")
         
         logger.info(f"Finished processing audio file: {input_file_path}")
     except Exception as e:
@@ -224,7 +176,7 @@ def process_media_file(input_file_path):
     load_models() # Ensure models are loaded
     
     if file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
-        # process_video(input_file_path)
+        process_video(input_file_path)
 
         # Check if the video has audio
         try:
@@ -243,19 +195,19 @@ def process_media_file(input_file_path):
     else:
         logger.error(f"Unsupported file type: {file_extension} for {input_file_path}")
 
-def main():
+def main(video_file_path):
     start_time = time.time()
     
     # Check if the hardcoded path exists
-    if not os.path.exists(VIDEO_FILE_PATH):
-        logger.error(f"Error: VIDEO_FILE_PATH '{VIDEO_FILE_PATH}' does not exist. Please update it to a valid path.")
+    if not os.path.exists(video_file_path):
+        logger.error(f"Error: VIDEO_FILE_PATH '{video_file_path}' does not exist. Please update it to a valid path.")
         return
 
-    with mlflow.start_run(run_name=f"Batch_Analysis_{os.path.basename(VIDEO_FILE_PATH)}_{time.strftime('%Y%m%d-%H%M%S')}"):
-        mlflow.log_param("input_file", VIDEO_FILE_PATH)
+    with mlflow.start_run(run_name=f"Batch_Analysis_{os.path.basename(video_file_path)}_{time.strftime('%Y%m%d-%H%M%S')}"):
+        mlflow.log_param("input_file", video_file_path)
         mlflow.log_param("analysis_type", "Offline Batch")
 
-        process_media_file(VIDEO_FILE_PATH)
+        process_media_file(video_file_path)
 
         end_time = time.time()
         duration = end_time - start_time
@@ -264,4 +216,8 @@ def main():
         logger.info(f"MLflow run logged. View with: 'mlflow ui'")
 
 if __name__ == '__main__':
-    main()
+
+    # --- Hardcoded File Path (UPDATE THIS!) ---
+    video_file_path = "C:\\Users\\kingk\\OneDrive\\Documents\\Projects\\AffectLink\\data\\WIN_20250529_10_51_21_Pro.mp4"
+
+    main(video_file_path)

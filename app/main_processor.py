@@ -188,6 +188,30 @@ def clear_stale_files():
 # Clear stale files at module import time
 clear_stale_files()
 
+def calculate_average_multimodal_similarity(facial_vector, audio_vector, text_vector):
+    
+    # Calculate pairwise cosine similarities
+    similarity_fa = calculate_cosine_similarity(facial_vector, audio_vector)
+    similarity_ft = calculate_cosine_similarity(facial_vector, text_vector)
+    similarity_at = calculate_cosine_similarity(audio_vector, text_vector)
+    
+    # Average similarity (or other combination logic)
+    # Consider only valid similarities (e.g. if a modality is not present, its vector might be all zeros)
+    valid_similarities = []
+    if facial_vector != [0.0] * len(UNIFIED_EMOTIONS) and audio_vector != [0.0] * len(UNIFIED_EMOTIONS):
+        valid_similarities.append(similarity_fa)
+    if facial_vector != [0.0] * len(UNIFIED_EMOTIONS) and text_vector != [0.0] * len(UNIFIED_EMOTIONS):
+        valid_similarities.append(similarity_ft)
+    if audio_vector != [0.0] * len(UNIFIED_EMOTIONS) and text_vector != [0.0] * len(UNIFIED_EMOTIONS):
+        valid_similarities.append(similarity_at)
+
+    if valid_similarities:
+        overall_cosine_similarity = sum(valid_similarities) / len(valid_similarities)
+    else:
+        overall_cosine_similarity = 0.0 # Default if no valid pairs
+        
+    return overall_cosine_similarity
+
 def main(emotion_queue=None, stop_event=None, camera_index=0):
     """Main function for emotion detection."""
     global shared_state, model, text_classifier, audio_feature_extractor, audio_classifier, face_cascade
@@ -392,25 +416,8 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
             if text_total > 0:
                 text_vector = [score/text_total for score in text_vector]
 
-            # Calculate pairwise cosine similarities
-            similarity_fa = calculate_cosine_similarity(facial_vector, audio_vector)
-            similarity_ft = calculate_cosine_similarity(facial_vector, text_vector)
-            similarity_at = calculate_cosine_similarity(audio_vector, text_vector)
-            
-            # Average similarity (or other combination logic)
-            # Consider only valid similarities (e.g. if a modality is not present, its vector might be all zeros)
-            valid_similarities = []
-            if facial_vector != [0.0] * len(UNIFIED_EMOTIONS) and audio_vector != [0.0] * len(UNIFIED_EMOTIONS):
-                valid_similarities.append(similarity_fa)
-            if facial_vector != [0.0] * len(UNIFIED_EMOTIONS) and text_vector != [0.0] * len(UNIFIED_EMOTIONS):
-                valid_similarities.append(similarity_ft)
-            if audio_vector != [0.0] * len(UNIFIED_EMOTIONS) and text_vector != [0.0] * len(UNIFIED_EMOTIONS):
-                valid_similarities.append(similarity_at)
-
-            if valid_similarities:
-                overall_cosine_similarity = sum(valid_similarities) / len(valid_similarities)
-            else:
-                overall_cosine_similarity = 0.0 # Default if no valid pairs
+            # Get overall cosine similarity
+            overall_cosine_similarity = calculate_average_multimodal_similarity(facial_vector, audio_vector, text_vector)
 
             result_data["cosine_similarity"] = overall_cosine_similarity
             result_data["consistency_level"] = get_consistency_level(overall_cosine_similarity)
