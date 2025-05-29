@@ -216,52 +216,29 @@ def process_video(shared_state, video_lock, video_started_event):
 
 		# Analyze face for emotion
 		try:
-			# Lock before accessing shared_state if necessary, though DeepFace is the dominant time sink here
-			analysis = DeepFace.analyze(
-				frame,
-				actions=['emotion'],
-				enforce_detection=False,
-				silent=True  # Suppress DeepFace's own console output
-			)
+			# Call the new function to get emotion data
+			facial_emotion_data, raw_emotion_scores = get_facial_emotion_from_frame(frame)
 
-			if analysis and isinstance(analysis, list) and len(analysis) > 0:
-				first_face = analysis[0]
-				# Get all raw scores from DeepFace, normalized to 0-1
-				raw_emotion_scores = {k: v / 100.0 for k, v in first_face['emotion'].items()}
-
-				valid_unified_scores = {}
-				for raw_emotion, raw_score in raw_emotion_scores.items():
-					unified_map_target = FACIAL_TO_UNIFIED.get(raw_emotion)
-					# Only consider emotions that map to a valid UNIFIED_EMOTION (i.e., not None in the mapping)
-					if unified_map_target is not None:
-						valid_unified_scores[unified_map_target] = max(valid_unified_scores.get(unified_map_target, 0.0), raw_score)
-				
-				final_emotion = "unknown"
-				final_confidence = 0.0
-				if valid_unified_scores and any(s > 0 for s in valid_unified_scores.values()):
-					# Find the dominant emotion from the filtered valid_unified_scores
-					final_emotion = max(valid_unified_scores, key=valid_unified_scores.get)
-					final_confidence = valid_unified_scores[final_emotion]
-				
-				logger.info(f"Facial emotion (filtered): {final_emotion} ({final_confidence:.2f})")
-
+			if facial_emotion_data and facial_emotion_data[0] != "unknown" and facial_emotion_data[0] != "error":
 				# Update shared_state
-				with video_lock:					
-					shared_state['facial_emotion'] = (final_emotion, final_confidence)
+				with video_lock:
+					shared_state['facial_emotion'] = facial_emotion_data
 					# Store the full RAW (but normalized) scores from DeepFace for potential detailed view or debugging
 					shared_state['facial_emotion_full_scores'] = raw_emotion_scores
-			else: # No face detected or error in analysis
-				# If no face is detected, or analysis is empty, report unknown
+			else:  # No face detected, or error in get_facial_emotion_from_frame
 				with video_lock:
-					shared_state['facial_emotion'] = ("unknown", 0.0)
-					shared_state['facial_emotion_full_scores'] = {} # Clear full scores too
-				logger.debug("No face detected or analysis empty.")
+					shared_state['facial_emotion'] = facial_emotion_data if facial_emotion_data else ("unknown", 0.0)
+					shared_state['facial_emotion_full_scores'] = raw_emotion_scores if raw_emotion_scores else {}
+				if facial_emotion_data and facial_emotion_data[0] == "error":
+					logger.debug("Error reported by get_facial_emotion_from_frame.")
+				else:
+					logger.debug("No face detected or analysis empty via get_facial_emotion_from_frame.")
 
 		except Exception as e:
 			with video_lock:
 				shared_state['facial_emotion'] = ("error", 0.0)
 				shared_state['facial_emotion_full_scores'] = {}
-			logger.error(f"Error during facial emotion analysis: {e}", exc_info=True)
+			logger.error(f"Error during facial emotion analysis using get_facial_emotion_from_frame: {e}", exc_info=True)
 
 		# Sleep briefly to avoid maxing out CPU
 		time.sleep(0.05)
