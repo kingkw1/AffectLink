@@ -1,3 +1,4 @@
+# filepath: c:\Users\kingk\OneDrive\Documents\Projects\AffectLink\app\batch_analyzer.py
 import os
 import sys
 import time
@@ -58,17 +59,17 @@ def load_models():
 
     if text_emotion_classifier is None:
         logger.info(f"Loading text emotion classifier: '{TEXT_CLASSIFIER_MODEL_ID}'...")
-        # Suppress TensorFlow warnings if using TF backend for pipeline
-        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # Suppress TF info, warning, error messages
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
         try:
             text_emotion_classifier = pipeline(
                 "sentiment-analysis", 
                 model=TEXT_CLASSIFIER_MODEL_ID, 
-                device=0 if torch.cuda.is_available() else -1
+                device=0 if torch.cuda.is_available() else -1,
+                return_all_scores=True # Ensure pipeline returns all scores for text emotion
             )
         except Exception as e:
             logger.error(f"Error loading text emotion classifier: {e}")
-            text_emotion_classifier = None # Ensure it's None if loading fails
+            text_emotion_classifier = None
         logger.info("Text emotion classifier loaded.")
 
     if audio_feature_extractor is None:
@@ -87,6 +88,7 @@ def load_models():
 
 def process_audio(input_file_path):
     logger.info(f"Processing audio from file: {input_file_path}")
+    audio_results = []
     try:
         # Load entire audio file
         audio_data, current_audio_sample_rate = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
@@ -97,15 +99,12 @@ def process_audio(input_file_path):
         for i in range(0, total_samples, samples_per_chunk):
             audio_chunk = audio_data[i : i + samples_per_chunk]
             
-            # If the chunk is too small at the end, pad it or skip
             if len(audio_chunk) < samples_per_chunk and i + samples_per_chunk < total_samples:
-                # Pad the last chunk if it's too short for the model to process effectively
                 padding_needed = samples_per_chunk - len(audio_chunk)
                 audio_chunk = np.pad(audio_chunk, (0, padding_needed), mode='constant')
             elif len(audio_chunk) == 0:
-                continue # Skip empty chunks
+                continue
 
-            # Process the audio chunk using the dedicated processor
             transcribed_text, text_emotion_data, audio_emotion_data = \
                 process_audio_chunk_from_file(
                     audio_chunk, current_audio_sample_rate, 
@@ -116,55 +115,71 @@ def process_audio(input_file_path):
             start_time_chunk_sec = i / current_audio_sample_rate
             end_time_chunk_sec = (i + len(audio_chunk)) / current_audio_sample_rate
 
-            logger.info(f"[{start_time_chunk_sec:.2f}s - {end_time_chunk_sec:.2f}s] Audio Chunk Results:")
-            logger.info(f"  Transcribed Text: \"{transcribed_text}\"")
-            logger.info(f"  Text Emotion: {text_emotion_data[0]} (Conf: {text_emotion_data[1]:.2f})")
-            logger.info(f"  Audio Emotion: {audio_emotion_data[0]} (Conf: {audio_emotion_data[1]:.2f})")
+            # NOTE: process_audio_chunk_from_file currently does not return full score dictionaries.
+            # Placeholder empty dicts are used for 'text_emotion_full_scores' and 'audio_emotion_full_scores'.
+            # This may need to be updated if process_audio_chunk_from_file is modified to provide them.
+            audio_results.append({
+                'start_time_sec': start_time_chunk_sec,
+                'end_time_sec': end_time_chunk_sec,
+                'transcribed_text': transcribed_text,
+                'text_emotion': text_emotion_data,
+                'audio_emotion': audio_emotion_data,
+                'text_emotion_full_scores': {}, # Placeholder
+                'audio_emotion_full_scores': {}  # Placeholder
+            })
         
-        logger.info(f"Finished processing audio file: {input_file_path}")
+        logger.info(f"Finished processing audio file: {input_file_path}. Collected {len(audio_results)} audio segments.")
     except Exception as e:
         logger.error(f"Error processing audio file {input_file_path}: {e}", exc_info=True)
+    return audio_results
 
 def process_video(input_file_path):
     logger.info(f"Processing video from file: {input_file_path}")
+    video_results = []
     cap = cv2.VideoCapture(input_file_path)
     if not cap.isOpened():
         logger.error(f"Error: Could not open video file {input_file_path}")
-        return
+        return video_results
 
     frame_idx = 0
     while True:
         ret, frame = cap.read()
         if not ret:
-            break # End of video
+            break
 
-        timestamp_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0 # Time in seconds
+        timestamp_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
 
-        facial_emotion = ("unknown", 0.0)
+        current_facial_emotion = ("unknown", 0.0)
+        current_facial_scores = {}
         
         try:                  
             facial_emotion_data, raw_emotion_scores = get_facial_emotion_from_frame(frame)
-                    
-            if facial_emotion_data and facial_emotion_data[0] != "unknown" and facial_emotion_data[0] != "error":
-                dominant_emotion, confidence = facial_emotion_data
-                confidence = max(raw_emotion_scores.values(), default=0.0) # Get max confidence from scores
 
-                # Map to unified emotion
-                unified_emotion = FACIAL_TO_UNIFIED.get(dominant_emotion)
-                if unified_emotion:
-                    facial_emotion = (unified_emotion, float(confidence))
-                else:
-                    logger.warning(f"Facial emotion label '{dominant_emotion}' not found in FACIAL_TO_UNIFIED map.")                
+            if facial_emotion_data and facial_emotion_data[0] != "unknown" and facial_emotion_data[0] != "error":
+                # facial_emotion_data is already (unified_emotion_label, confidence)
+                # raw_emotion_scores is the dictionary of full scores
+                current_facial_emotion = facial_emotion_data
+                current_facial_scores = raw_emotion_scores
+                logger.info(f"[{timestamp_sec:.2f}s] Frame {frame_idx}:  Facial emotion (filtered): {facial_emotion_data[0]} ({facial_emotion_data[1]:.2f})")
+            elif facial_emotion_data: # Handle cases like ("unknown", 0.0) or ("error", 0.0) from get_facial_emotion_from_frame
+                current_facial_emotion = facial_emotion_data
+                current_facial_scores = raw_emotion_scores if raw_emotion_scores else {}
+            # If facial_emotion_data is None, defaults remain ("unknown", 0.0) and {}
 
         except Exception as e:
-            logger.debug(f"No face detected or error in facial analysis for frame {frame_idx}: {e}")
-            facial_emotion = ("unknown", 0.0)
+            logger.debug(f"Error in facial analysis for frame {frame_idx} at {timestamp_sec:.2f}s: {e}")
+            # Defaults current_facial_emotion = ("unknown", 0.0), current_facial_scores = {} are kept
 
-        logger.info(f"[{timestamp_sec:.2f}s] Frame {frame_idx}: Facial Emotion: {facial_emotion[0]} (Conf: {facial_emotion[1]:.2f})")
+        video_results.append({
+            'timestamp_sec': timestamp_sec,
+            'facial_emotion': current_facial_emotion,
+            'facial_emotion_full_scores': current_facial_scores
+        })
         frame_idx += 1
     
     cap.release()
-    logger.info(f"Finished processing video file: {input_file_path}")
+    logger.info(f"Finished processing video file: {input_file_path}. Collected {len(video_results)} video frames.")
+    return video_results
 
 
 def process_media_file(input_file_path):
@@ -175,39 +190,60 @@ def process_media_file(input_file_path):
     
     load_models() # Ensure models are loaded
     
-    if file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
-        process_video(input_file_path)
+    video_results = []
+    audio_results = []
 
-        # Check if the video has audio
+    if file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
+        video_results = process_video(input_file_path)
+
         try:
-            audio_data, sample_rate = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
-            if len(audio_data) > 0:
-                logger.info(f"Audio track found in video {input_file_path}. Processing audio...")
-                process_audio(input_file_path)
+            # Attempt to load audio from the video file to check if it exists
+            # We don't need to store the data here if process_audio will load it again,
+            # but it's a quick check. Alternatively, process_audio could take raw data.
+            temp_audio_data, _ = librosa.load(input_file_path, sr=AUDIO_SAMPLE_RATE, mono=True, dtype=np.float32)
+            if len(temp_audio_data) > 0:
+                logger.info(f"Video file {input_file_path} contains audio. Processing audio component.")
+                audio_results = process_audio(input_file_path) # Process the same file for audio
             else:
-                logger.warning(f"No audio track found in video {input_file_path}.")
+                logger.info(f"Video file {input_file_path} does not contain a significant audio component.")
         except Exception as e:
-            logger.error(f"Error loading audio from video file {input_file_path}: {e}", exc_info=True)
+            logger.warning(f"Could not load or process audio from video file {input_file_path}: {e}", exc_info=True)
 
     elif file_extension in ['.wav', '.mp3', '.flac', '.m4a', '.ogg']:
-        process_audio(input_file_path)
+        audio_results = process_audio(input_file_path)
 
     else:
         logger.error(f"Unsupported file type: {file_extension} for {input_file_path}")
+        return [], []
 
-def main(video_file_path):
+    logger.info(f"Media processing complete for {input_file_path}.")
+    if video_results:
+        logger.info(f"Collected {len(video_results)} video analysis results.")
+    if audio_results:
+        logger.info(f"Collected {len(audio_results)} audio analysis results.")
+    
+    # For now, just returning them. Further processing (like consistency analysis) would happen here or be passed on.
+    return video_results, audio_results
+
+def main(video_file_path): # Renamed parameter for clarity
     start_time = time.time()
     
-    # Check if the hardcoded path exists
     if not os.path.exists(video_file_path):
-        logger.error(f"Error: VIDEO_FILE_PATH '{video_file_path}' does not exist. Please update it to a valid path.")
+        logger.error(f"Error: Input media file '{video_file_path}' does not exist. Please update the path.")
         return
 
     with mlflow.start_run(run_name=f"Batch_Analysis_{os.path.basename(video_file_path)}_{time.strftime('%Y%m%d-%H%M%S')}"):
         mlflow.log_param("input_file", video_file_path)
         mlflow.log_param("analysis_type", "Offline Batch")
 
-        process_media_file(video_file_path)
+        video_results, audio_results = process_media_file(video_file_path)
+
+        # TODO: Implement consistency analysis using video_results and audio_results
+        # For now, we just log that the data is available.
+        if video_results:
+            logger.info(f"Main: Received {len(video_results)} video results for further analysis.")
+        if audio_results:
+            logger.info(f"Main: Received {len(audio_results)} audio results for further analysis.")
 
         end_time = time.time()
         duration = end_time - start_time
@@ -217,7 +253,6 @@ def main(video_file_path):
 
 if __name__ == '__main__':
 
-    # --- Hardcoded File Path (UPDATE THIS!) ---
-    video_file_path = "C:\\Users\\kingk\\OneDrive\\Documents\\Projects\\AffectLink\\data\\WIN_20250529_10_51_21_Pro.mp4"
+    media_file_path = "C:\\Users\\kingk\\OneDrive\\Documents\\Projects\\AffectLink\\data\\WIN_20250529_10_51_21_Pro.mp4"
 
-    main(video_file_path)
+    main(media_file_path)
