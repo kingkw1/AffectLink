@@ -117,6 +117,26 @@ def create_unified_emotion_vector(emotion_scores, mapping_dict):
         
     return unified_vector
 
+def create_unified_emotion_dict(emotion_scores, mapping_dict):
+    """
+    Create a dictionary of unified emotion scores
+    """
+    unified_scores = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
+    
+    for emotion, score in emotion_scores.items():
+        if emotion in mapping_dict and mapping_dict[emotion] is not None:
+            unified_emotion = mapping_dict[emotion]
+            if unified_emotion in unified_scores:
+                unified_scores[unified_emotion] += score
+                
+    # Normalize
+    total = sum(unified_scores.values())
+    if total > 0:
+        for emotion in unified_scores:
+            unified_scores[emotion] /= total
+            
+    return unified_scores
+
 # Suppress DeepFace logging for cleaner console output
 logging.getLogger('deepface').setLevel(logging.ERROR) # Changed to target 'deepface' specifically
 
@@ -189,6 +209,18 @@ def clear_stale_files():
 clear_stale_files()
 
 def calculate_average_multimodal_similarity(facial_vector, audio_vector, text_vector):
+    """
+    Calculate average cosine similarity across three modalities:
+    facial, audio, and text.
+    Returns the average similarity score.
+    
+    Args:
+        facial_vector (list): Vector of facial emotion scores.
+        audio_vector (list): Vector of audio emotion scores.
+        text_vector (list): Vector of text emotion scores.
+    Returns:
+        float: Overall cosine similarity score across modalities.
+        """
     
     # Calculate pairwise cosine similarities
     similarity_fa = calculate_cosine_similarity(facial_vector, audio_vector)

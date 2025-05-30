@@ -1,4 +1,3 @@
-# filepath: c:\Users\kingk\OneDrive\Documents\Projects\AffectLink\app\batch_analyzer.py
 import os
 import sys
 import time
@@ -26,7 +25,7 @@ from constants import (
 )
 from audio_emotion_processor import process_audio_chunk_from_file
 from video_emotion_processor import get_facial_emotion_from_frame
-from main_processor import calculate_cosine_similarity, get_consistency_level, calculate_average_multimodal_similarity
+from main_processor import create_unified_emotion_dict, calculate_average_multimodal_similarity
 
 # Set up environment for DeepFace model caching
 deepface_cache_dir = os.path.join(project_root, "models", "deepface_cache")
@@ -186,7 +185,7 @@ def process_video(input_file_path, frame_processing_rate=1):
     return video_results
 
 
-def _convert_scores_to_unified_vector(scores_dict, unified_emotions_list):
+def _convert_scores_to_unified_vector(scores_dict, unified_emotions_list=UNIFIED_EMOTIONS):
     """
     Converts a dictionary of emotion scores to a consistent vector (list of floats)
     based on a predefined order of unified emotions. Missing emotions get a score of 0.0.
@@ -257,10 +256,15 @@ def prepare_data_for_similarity_calculation(video_results, audio_results):
             for emotion in avg_facial_scores:
                 avg_facial_scores[emotion] /= num_frames
         
-        # 2. Convert aggregated scores and chunk-based scores into unified vectors
-        facial_vector = _convert_scores_to_unified_vector(avg_facial_scores, UNIFIED_EMOTIONS)
-        audio_vector = _convert_scores_to_unified_vector(audio_chunk_result.get('audio_emotion_full_scores', {}), UNIFIED_EMOTIONS)
-        text_vector = _convert_scores_to_unified_vector(audio_chunk_result.get('text_emotion_full_scores', {}), UNIFIED_EMOTIONS)
+        # 2. Convert scores to unified vectors
+        unified_facial_scores = create_unified_emotion_dict(avg_facial_scores, FACIAL_TO_UNIFIED)
+        unified_audio_scores = create_unified_emotion_dict(audio_chunk_result.get('audio_emotion_full_scores', {}), SER_TO_UNIFIED)
+        unified_text_scores = create_unified_emotion_dict(audio_chunk_result.get('text_emotion_full_scores', {}), TEXT_TO_UNIFIED)
+
+        # 3. Convert aggregated scores and chunk-based scores into unified vectors
+        facial_vector = _convert_scores_to_unified_vector(unified_facial_scores, UNIFIED_EMOTIONS)
+        audio_vector = _convert_scores_to_unified_vector(unified_audio_scores, UNIFIED_EMOTIONS)
+        text_vector = _convert_scores_to_unified_vector(unified_text_scores, UNIFIED_EMOTIONS)
 
         aligned_data.append({
             'timestamp_start_sec': audio_chunk_start_time,
