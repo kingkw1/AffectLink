@@ -12,7 +12,6 @@ from collections import deque
 import os
 import tempfile
 import math
-import random
 import json
 import shutil
 import traceback # Moved from various functions
@@ -164,7 +163,7 @@ shared_state = {
 }
 
 # Reusable whisper model instance
-model = None
+whisper_model = None
 
 # Text emotion classification pipeline
 text_classifier = None
@@ -244,14 +243,8 @@ def calculate_average_multimodal_similarity(facial_vector, audio_vector, text_ve
         
     return overall_cosine_similarity
 
-def main(emotion_queue=None, stop_event=None, camera_index=0):
-    """Main function for emotion detection."""
-    global shared_state, model, text_classifier, audio_feature_extractor, audio_classifier, face_cascade
-    # Ensure ser_model and ser_processor are correctly scoped or passed if needed by audio_processing_loop
-    # Depending on their initialization, they might need to be global or passed differently.
+def load_models():
     
-    logger.info(f"Detect_emotion main started with camera_index: {camera_index}")
-
     # Define project root and model cache directories
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir) # This assumes 'app' is one level down from project root
@@ -265,37 +258,20 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     logger.info(f"Whisper models will be cached in: {whisper_cache_dir}")
     logger.info(f"Transformers models will be cached in: {transformers_cache_dir}")
     
-    # Store the queue and stop event
-    shared_state['emotion_queue'] = emotion_queue
-    shared_state['stop_event'] = stop_event
-    
-    # Convert int/str camera_index to int
-    if isinstance(camera_index, str):
-        camera_index = int(camera_index)
-    
-    # Create a dictionary to hold the stop flag if not provided
-    stop_flag = {'stop': False}
-    if stop_event is None:
-        shared_state['stop_event'] = stop_flag
-    
-    # Log if we have access to a frame queue
-    if isinstance(stop_event, dict) and 'shared_frame_data' in stop_event:
-        print(f"Detector received shared frame queue: {stop_event['shared_frame_data']}")
-    
     # Initialize the Whisper model for transcription
     print("Initializing Whisper model...")
     try:
         # Use base model instead of tiny for better accuracy
-        model = whisper.load_model("base", download_root=whisper_cache_dir)
+        whisper_model = whisper.load_model("base", download_root=whisper_cache_dir)
         # Verify whisper model loaded correctly
-        if model is None:
+        if whisper_model is None:
             logger.error("Failed to initialize Whisper model")
             return
-        logger.info(f"Whisper model successfully loaded: {type(model).__name__} (base)")
+        logger.info(f"Whisper model successfully loaded: {type(whisper_model).__name__} (base)")
         
         # Move model to CUDA if available
-        if hasattr(model, 'to') and torch.cuda.is_available():
-            model = model.to("cuda")
+        if hasattr(whisper_model, 'to') and torch.cuda.is_available():
+            whisper_model = whisper_model.to("cuda")
             logger.info("Whisper model moved to CUDA")
     except Exception as e:
         logger.error(f"Error loading Whisper model: {e}")
@@ -307,7 +283,8 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
         text_classifier = pipeline("text-classification", 
                                 model="j-hartmann/emotion-english-distilroberta-base", 
                                 top_k=None,
-                                cache_dir=transformers_cache_dir)
+                                # cache_dir=transformers_cache_dir
+                                )
     except Exception as e:
         logger.error(f"Error loading text classifier: {e}")
         return  # Exit if we can't load the classifier
@@ -318,10 +295,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     print(f"Device set to use {device}")
         
     ser_model_name = "superb/hubert-large-superb-er" # Correct SER model
-    try:
-        # audio_feature_extractor = AutoFeatureExtractor.from_pretrained(model_name) # Original
-        # audio_classifier = AutoModelForAudioClassification.from_pretrained(model_name) # Original
-        
+    try:      
         audio_feature_extractor = AutoFeatureExtractor.from_pretrained(ser_model_name, cache_dir=transformers_cache_dir)
         audio_classifier = AutoModelForAudioClassification.from_pretrained(ser_model_name, cache_dir=transformers_cache_dir)
         
@@ -340,10 +314,38 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     except Exception as e:
         logger.error(f"Error loading audio classifier: {e}")
     
+    return whisper_model, text_classifier, audio_feature_extractor, audio_classifier, device
+
+def main(emotion_queue=None, stop_event=None, camera_index=0):
+    """Main function for emotion detection."""
+    global shared_state, whisper_model, text_classifier, audio_feature_extractor, audio_classifier, face_cascade
+    # Ensure ser_model and ser_processor are correctly scoped or passed if needed by audio_processing_loop
+    # Depending on their initialization, they might need to be global or passed differently.
+    
+    logger.info(f"Detect_emotion main started with camera_index: {camera_index}")
+        
+    # Store the queue and stop event
+    shared_state['emotion_queue'] = emotion_queue
+    shared_state['stop_event'] = stop_event
+    
+    # Convert int/str camera_index to int
+    if isinstance(camera_index, str):
+        camera_index = int(camera_index)
+    
+    # Create a dictionary to hold the stop flag if not provided
+    stop_flag = {'stop': False}
+    if stop_event is None:
+        shared_state['stop_event'] = stop_flag
+    
+    # Log if we have access to a frame queue
+    if isinstance(stop_event, dict) and 'shared_frame_data' in stop_event:
+        print(f"Detector received shared frame queue: {stop_event['shared_frame_data']}")
+    
+    # Load models
+    whisper_model, text_classifier, audio_feature_extractor, audio_classifier, device = load_models()
+
     # Event for synchronization between video and audio threads
     video_started_event = threading.Event()
-
-    # --- START AUDIO PROCESSING COMPONENTS ---
     
     # Start audio recording thread first (collects audio data)
     print("Starting audio recording thread...")
@@ -364,7 +366,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
         audio_processing_thread = threading.Thread(
             target=audio_processing_loop,
             args=(shared_state, audio_lock, 
-                  model, text_classifier, 
+                  whisper_model, text_classifier, 
                   audio_classifier, audio_feature_extractor, 
                   device, video_started_event)
         )
