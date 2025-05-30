@@ -1,30 +1,48 @@
-# Problem 1
-You're encountering a very common issue when running OpenCV (which opencv-python and DeepFace depend on) in containerized or headless environments like AI Studio: ImportError: libGL.so.1: cannot open shared object file: No such file or directory.
+## AffectLink Environment Setup: System Dependencies
 
-This error indicates that a shared library that OpenCV needs for its graphical operations (specifically libGL.so.1, which is part of OpenGL, commonly used for rendering graphics) is missing from the system. Even if you're not explicitly displaying video windows, OpenCV often has this dependency compiled in.
+To ensure AffectLink runs correctly, especially in headless or containerized environments like Azure AI Studio, you need to install certain system-level libraries that are not handled by Python's `pip` package manager.
 
-pip install handles Python packages, but it doesn't install system-level libraries like libGL.so.1.
-Solution: Install Missing System Dependencies
+These instructions assume a Debian/Ubuntu-based Linux environment, which is common for many cloud and Docker deployments.
 
-You need to install the missing OpenGL library on the system where your AI Studio environment is running. Since it's a Linux-based environment (judging by libGL.so.1 and jovyan@f37e6890d421), you'll typically use apt or yum (or mamba/conda if you're in a conda environment).
+### 1. OpenCV (libGL.so.1) Dependency
 
-Common solution for Debian/Ubuntu-based systems (like many Docker containers):
+**Problem:**
+You might encounter an `ImportError: libGL.so.1: cannot open shared object file: No such file or directory`. This error indicates that OpenCV, which DeepFace relies on, requires a graphics rendering library (libGL.so.1, part of OpenGL) that is missing from the system. `pip install opencv-python` only installs the Python bindings, not the underlying system library.
 
-You'll usually install libgl1-mesa-glx or libgl1.
-Bash
+**Solution:**
+Install the `libgl1-mesa-glx` package, which provides the necessary `libGL.so.1` library.
 
+```bash
 sudo apt-get update
 sudo apt-get install -y libgl1-mesa-glx
+```
 
+### 2. SoundDevice (PortAudio) Dependency
 
-# Problem 2
-sounddevice is a Python library that provides bindings for the PortAudio library, which is a cross-platform audio I/O library. Just like OpenCV needed a system-level graphics library (libGL), sounddevice needs a system-level audio library (PortAudio). pip install sounddevice only installs the Python wrapper, not the underlying C library.
-Solution: Install PortAudio Library
+**Problem:**
+Similar to OpenCV, `sounddevice` is a Python library that provides bindings for the PortAudio library, a cross-platform audio I/O library. `pip install sounddevice` only installs the Python wrapper, not the underlying C library. Without PortAudio, `sounddevice` cannot function.
 
-You need to install the PortAudio development library on your AI Studio environment.
+**Solution:**
+Install the PortAudio development library (`portaudio19-dev`) on your system.
 
-For Debian/Ubuntu-based systems (most common in Docker/cloud environments):
-Bash
-
+```bash
 sudo apt-get update
 sudo apt-get install -y portaudio19-dev
+```
+
+### Summary of System-Level Installations
+
+To prepare your environment for AffectLink, run both of these commands in your terminal or include them in your Dockerfile/setup script:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libgl1-mesa-glx portaudio19-dev
+```
+
+After installing these system dependencies, ensure all your Python dependencies (from a `requirements.txt` file) are also installed:
+
+```bash
+pip install -r requirements.txt
+```
+
+These steps should resolve the common `libGL.so.1` and `sounddevice` related errors, allowing your AffectLink application to run smoothly.
