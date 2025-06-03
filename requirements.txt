@@ -1,7 +1,7 @@
 opencv-python
 DeepFace
 transformers
-whisper
+openai-whisper
 sounddevice
 librosa
 torch

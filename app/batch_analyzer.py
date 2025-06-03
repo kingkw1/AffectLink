@@ -16,6 +16,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 if project_root not in sys.path:
     sys.path.append(project_root)
+DATA_DIR = os.path.join(project_root, "data")
 
 # Import local modules
 from constants import (
@@ -25,7 +26,7 @@ from constants import (
 )
 from audio_emotion_processor import process_audio_chunk_from_file
 from video_emotion_processor import get_facial_emotion_from_frame
-from main_processor import create_unified_emotion_dict, calculate_average_multimodal_similarity
+from main_processor import create_unified_emotion_dict, calculate_average_multimodal_similarity, load_models
 
 # Set up environment for DeepFace model caching
 deepface_cache_dir = os.path.join(project_root, "models", "deepface_cache")
@@ -46,44 +47,6 @@ text_emotion_classifier = None
 audio_feature_extractor = None
 audio_emotion_classifier = None
 
-def load_models():
-    """Loads all necessary AI/ML models."""
-    global whisper_model, text_emotion_classifier, audio_feature_extractor, audio_emotion_classifier
-    logger.info("Starting model loading...")
-    
-    if whisper_model is None:
-        logger.info("Loading Whisper model 'base'...")
-        whisper_model = whisper.load_model("base")
-        logger.info("Whisper model loaded.")
-
-    if text_emotion_classifier is None:
-        logger.info(f"Loading text emotion classifier: '{TEXT_CLASSIFIER_MODEL_ID}'...")
-        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
-        try:
-            text_emotion_classifier = pipeline(
-                "sentiment-analysis", 
-                model=TEXT_CLASSIFIER_MODEL_ID, 
-                device=0 if torch.cuda.is_available() else -1,
-                return_all_scores=True # Ensure pipeline returns all scores for text emotion
-            )
-        except Exception as e:
-            logger.error(f"Error loading text emotion classifier: {e}")
-            text_emotion_classifier = None
-        logger.info("Text emotion classifier loaded.")
-
-    if audio_feature_extractor is None:
-        logger.info(f"Loading audio feature extractor: '{SER_MODEL_ID}'...")
-        audio_feature_extractor = AutoFeatureExtractor.from_pretrained(SER_MODEL_ID)
-        logger.info("Audio feature extractor loaded.")
-
-    if audio_emotion_classifier is None:
-        logger.info(f"Loading audio emotion classifier: '{SER_MODEL_ID}'...")
-        audio_emotion_classifier = AutoModelForAudioClassification.from_pretrained(SER_MODEL_ID)
-        if torch.cuda.is_available():
-            audio_emotion_classifier.to("cuda")
-        logger.info("Audio emotion classifier loaded.")
-
-    logger.info("All models loaded.")
 
 def process_audio(input_file_path):
     logger.info(f"Processing audio from file: {input_file_path}")
@@ -284,7 +247,7 @@ def process_media_file(input_file_path, frame_processing_rate=1):
     """
     file_extension = os.path.splitext(input_file_path)[1].lower()
     
-    load_models() # Ensure models are loaded
+    # load_models() # Ensure models are loaded
     
     video_results = []
     audio_results = []
@@ -325,6 +288,15 @@ def main(video_file_path, frame_processing_rate=1): # Renamed parameter for clar
         logger.error(f"Error: Input media file '{video_file_path}' does not exist. Please update the path.")
         return
 
+    # Ensure models are loaded before starting the analysis
+    global whisper_model, text_emotion_classifier, audio_feature_extractor, audio_emotion_classifier
+    whisper_model, text_emotion_classifier, audio_feature_extractor, audio_emotion_classifier, device = load_models()
+
+    logger.info(f"Starting batch analysis for file: {video_file_path} with frame_processing_rate={frame_processing_rate}")
+    
+    # Set up MLflow experiment
+    mlflow.set_experiment(experiment_name="Batch_Multimodal_Analysis")
+
     with mlflow.start_run(run_name=f"Batch_Analysis_{os.path.basename(video_file_path)}_{time.strftime('%Y%m%d-%H%M%S')}"):
         mlflow.log_param("input_file", video_file_path)
         mlflow.log_param("analysis_type", "Offline Batch")
@@ -357,7 +329,6 @@ def main(video_file_path, frame_processing_rate=1): # Renamed parameter for clar
         else:
             logger.warning("No video or audio results found for consistency calculation.")
 
-        # TODO: Implement consistency analysis using video_results and audio_results
         # For now, we just log that the data is available.
         if video_results:
             logger.info(f"Main: Received {len(video_results)} video results for further analysis.")
@@ -371,8 +342,7 @@ def main(video_file_path, frame_processing_rate=1): # Renamed parameter for clar
         logger.info(f"MLflow run logged. View with: 'mlflow ui'")
 
 if __name__ == '__main__':
-
-    media_file_path = "C:\\\\Users\\\\kingk\\\\OneDrive\\\\Documents\\\\Projects\\\\AffectLink\\\\data\\\\WIN_20250529_10_51_21_Pro.mp4"
+    media_file_path = os.path.join(DATA_DIR, "sample_video.mp4")
     desired_frame_processing_rate = 20 # Process every 5th frame
 
     main(media_file_path, frame_processing_rate=desired_frame_processing_rate)
