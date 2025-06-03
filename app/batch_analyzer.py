@@ -281,33 +281,48 @@ def process_media_file(input_file_path, frame_processing_rate=1):
     # For now, just returning them. Further processing (like consistency analysis) would happen here or be passed on.
     return video_results, audio_results
 
-def main(video_file_path, frame_processing_rate=1): # Renamed parameter for clarity
-    start_time = time.time()
+def run_batch_analysis(media_file_path, frame_processing_rate=1):
+    """
+    Runs multimodal emotion analysis on a given media file (video/audio).
+    Logs parameters and metrics to MLflow.
+    """
+    logger.info(f"Starting batch analysis for {media_file_path}")
     
-    if not os.path.exists(video_file_path):
-        logger.error(f"Error: Input media file '{video_file_path}' does not exist. Please update the path.")
-        return
-
-    # Ensure models are loaded before starting the analysis
-    global whisper_model, text_emotion_classifier, audio_feature_extractor, audio_emotion_classifier
-    whisper_model, text_emotion_classifier, audio_feature_extractor, audio_emotion_classifier, device = load_models()
-
-    logger.info(f"Starting batch analysis for file: {video_file_path} with frame_processing_rate={frame_processing_rate}")
-    
-    # Set up MLflow experiment
-    mlflow.set_experiment(experiment_name="Batch_Multimodal_Analysis")
-
-    with mlflow.start_run(run_name=f"Batch_Analysis_{os.path.basename(video_file_path)}_{time.strftime('%Y%m%d-%H%M%S')}"):
-        mlflow.log_param("input_file", video_file_path)
-        mlflow.log_param("analysis_type", "Offline Batch")
+    # Initialize MLflow run
+    # The run name will be clearly visible in the MLflow UI
+    with mlflow.start_run(run_name=f"Batch Analysis - {os.path.basename(media_file_path)}") as run:
+        logger.info(f"MLflow Run ID: {run.info.run_id}")
+        
+        start_time = time.time()
+        
+        if not os.path.exists(media_file_path):
+            logger.error(f"Error: Input media file '{media_file_path}' does not exist. Please update the path.")
+            return
+        
+        # --- Log Parameters ---
+        mlflow.log_param("input_file_path", media_file_path)
         mlflow.log_param("frame_processing_rate", frame_processing_rate)
+        mlflow.log_param("deepface_cache_dir", deepface_cache_dir)
+        mlflow.log_param("text_classifier_model_id", TEXT_CLASSIFIER_MODEL_ID)
+        mlflow.log_param("ser_model_id", SER_MODEL_ID)
+        logger.info("Logged run parameters to MLflow.")
 
-        video_results, audio_results = process_media_file(video_file_path, frame_processing_rate=frame_processing_rate)
+        # Ensure models are loaded before starting the analysis
+        global whisper_model, text_emotion_classifier, audio_feature_extractor, audio_emotion_classifier
+        whisper_model, text_emotion_classifier, audio_feature_extractor, audio_emotion_classifier, device = load_models()
+
+        logger.info(f"Starting batch analysis for file: {media_file_path} with frame_processing_rate={frame_processing_rate}")
+        
+        video_results, audio_results = process_media_file(media_file_path, frame_processing_rate=frame_processing_rate)
 
         # --- Data Preparation for Similarity Calculation ---
         if video_results and audio_results:
             aligned_for_similarity = prepare_data_for_similarity_calculation(video_results, audio_results)
             logger.info(f"Prepared {len(aligned_for_similarity)} aligned data chunks for similarity calculation.")
+            
+            # Calculate average similarity across all chunks
+            total_similarity = 0.0
+            total_chunks_with_similarity = 0
             
             # Example of how you would then use this data for calculation
             for chunk in aligned_for_similarity:
@@ -316,11 +331,24 @@ def main(video_file_path, frame_processing_rate=1): # Renamed parameter for clar
                     chunk['audio_vector'],
                     chunk['text_vector']
                 )
+                # Add to running total for average calculation
+                if avg_similarity is not None:
+                    total_similarity += avg_similarity
+                    total_chunks_with_similarity += 1
+                    
                 logger.info(f"Chunk [{chunk['timestamp_start_sec']:.2f}s - {chunk['timestamp_end_sec']:.2f}s]: Average Similarity = {avg_similarity:.2f}")
                 logger.info(f"  Facial Vector: {chunk['facial_vector']}")
                 logger.info(f"  Audio Vector: {chunk['audio_vector']}")
                 logger.info(f"  Text Vector: {chunk['text_vector']}")
                 logger.info(f"  Transcribed Text: {chunk['transcribed_text']}")
+            
+            # Calculate and log average cosine similarity if we have valid data
+            if total_chunks_with_similarity > 0:
+                average_cosine_similarity = total_similarity / total_chunks_with_similarity
+                mlflow.log_metric("average_cosine_similarity", average_cosine_similarity)
+                logger.info(f"Logged average_cosine_similarity: {average_cosine_similarity:.4f}")
+            else:
+                logger.warning("No valid cosine similarities to average. Skipping average_cosine_similarity metric.")
 
         elif video_results:
             logger.info("Only video results available. Cannot perform multimodal consistency calculation.")
@@ -340,6 +368,13 @@ def main(video_file_path, frame_processing_rate=1): # Renamed parameter for clar
         mlflow.log_metric("processing_duration_seconds", duration)
         logger.info(f"Batch analysis completed in {duration:.2f} seconds.")
         logger.info(f"MLflow run logged. View with: 'mlflow ui'")
+
+def main(video_file_path, frame_processing_rate=1): # Renamed parameter for clarity
+    # Set up MLflow experiment
+    mlflow.set_experiment(experiment_name="Batch_Multimodal_Analysis")
+    
+    # Call the run_batch_analysis function that handles the actual processing and MLflow logging
+    run_batch_analysis(video_file_path, frame_processing_rate)
 
 if __name__ == '__main__':
     media_file_path = os.path.join(DATA_DIR, "sample_video.mp4")
