@@ -1,13 +1,19 @@
 import mlflow
-import os
-import torch
 import whisper
-from transformers import pipeline, AutoModelForAudioClassification, AutoFeatureExtractor, AutoTokenizer
+from transformers import pipeline, AutoModelForAudioClassification, AutoFeatureExtractor
 from deepface import DeepFace
+from deepface.modules import modeling # Keep this import!
 import tensorflow as tf
 import sys
 import subprocess
 import logging
+import numpy as np # Import numpy for array creation
+import os
+
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Dropout # Added Dropout
+from mlflow.models.signature import ModelSignature
+from mlflow.types.schema import Schema, TensorSpec
 
 # Set up logging for clearer output
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -56,32 +62,6 @@ def register_affectlink_models():
         if not pip_requirements:
             logger.warning("Could not gather pip requirements. Model reproducibility might be affected.")
 
-        # 1. Register DeepFace's Facial Emotion Model
-        # DeepFace's 'Emotion' model is an underlying Keras/TensorFlow model.
-        logger.info("Loading and registering DeepFace Facial Emotion Model...")
-        try:
-            # Build the DeepFace emotion model. DeepFace handles caching.
-            facial_emotion_model = DeepFace.build_model("Emotion")
-
-            # Infer signature for the Keras model: input is a 48x48 grayscale image, output is emotion scores.
-            # Note: DeepFace models expect 48x48 grayscale images (batch_size, 48, 48, 1).
-            # The output for emotion is typically 7 classes (angry, disgust, fear, happy, sad, surprise, neutral).
-            input_example = tf.zeros((1, 48, 48, 1), dtype=tf.float32)
-            # Assuming a 7-class output as per DeepFace's default emotion model
-            output_example = tf.zeros((1, 7), dtype=tf.float32)
-
-            mlflow.keras.log_model(
-                keras_model=facial_emotion_model,
-                artifact_path="deepface_facial_emotion_model",
-                signature=mlflow.models.infer_signature(input_example, output_example),
-                registered_model_name="DeepFaceFacialEmotionModel",
-                pip_requirements=pip_requirements,
-                input_example=input_example # Provide an input example for better understanding
-            )
-            logger.info("Registered DeepFace Facial Emotion Model.")
-        except Exception as e:
-            logger.error(f"Failed to register DeepFace Facial Emotion Model: {e}")
-
         # 2. Register Whisper ASR Model
         logger.info(f"Loading and registering Whisper '{WHISPER_MODEL_SIZE}' ASR Model...")
         try:
@@ -100,7 +80,6 @@ def register_affectlink_models():
             logger.info(f"Registered Whisper '{WHISPER_MODEL_SIZE}' ASR Model.")
         except Exception as e:
             logger.error(f"Failed to register Whisper ASR Model: {e}")
-
 
         # 3. Register Text Emotion Classification Model (Hugging Face Pipeline)
         logger.info(f"Loading and registering Text Emotion Model ({TEXT_CLASSIFIER_MODEL_ID})...")

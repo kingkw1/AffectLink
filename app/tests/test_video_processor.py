@@ -1,7 +1,6 @@
 import cv2
 import os
 import sys
-import numpy as np
 import logging # For the logger in video_emotion_processor
 
 # Add the current directory to sys.path to import local modules
@@ -28,8 +27,9 @@ from app.video_processor import get_facial_emotion_from_frame
 # --- Configuration for Testing ---
 # Provide a path to a test image or a video file.
 # If using a video file, we'll extract the first frame.
-TEST_MEDIA_PATH = r"C:\Users\kingk\OneDrive\Documents\Projects\AffectLink\data\WIN_20250529_10_51_21_Pro.mp4" # <--- IMPORTANT: CHANGE THIS PATH
-# Example: "test_image.jpg" or "test_video.mp4"
+# Use a relative path to a sample media file within the project directory (e.g., in a 'data' folder at the project root)
+TEST_MEDIA_PATH = os.path.join(project_root, "data", "sample_video.mp4")
+# Example: os.path.join(project_root, "data", "test_image.jpg") or os.path.join(project_root, "data", "test_video.mp4")
 
 def run_test():
     frame_to_process = None
