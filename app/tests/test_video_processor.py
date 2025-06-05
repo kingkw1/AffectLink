@@ -23,7 +23,7 @@ logging.getLogger('deepface').setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Import the new function from your actual video_emotion_processor.py
-from app.video_emotion_processor import get_facial_emotion_from_frame
+from app.video_processor import get_facial_emotion_from_frame
 
 # --- Configuration for Testing ---
 # Provide a path to a test image or a video file.

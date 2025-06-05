@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Import the new function and necessary constants
 try:
-    from audio_emotion_processor import process_audio_chunk_from_file
+    from app.audio_processor import process_audio_chunk_from_file
     # Import constants from wherever they reside in your project
     # Adjust this import based on your actual constants.py location
     from constants import SER_TO_UNIFIED, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS 

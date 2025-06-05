@@ -24,8 +24,8 @@ from constants import (
     AUDIO_SAMPLE_RATE, AUDIO_CHUNK_SIZE,
     TEXT_CLASSIFIER_MODEL_ID, SER_MODEL_ID
 )
-from audio_emotion_processor import process_audio_chunk_from_file
-from video_emotion_processor import get_facial_emotion_from_frame
+from app.audio_processor import process_audio_chunk_from_file
+from app.video_processor import get_facial_emotion_from_frame
 from main_processor import create_unified_emotion_dict, calculate_average_multimodal_similarity, load_models
 
 # Set up environment for DeepFace model caching

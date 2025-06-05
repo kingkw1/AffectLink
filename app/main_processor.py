@@ -23,8 +23,8 @@ import threading
 import numpy as np
 
 from constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS, TEXT_TO_UNIFIED # Ensure TEXT_TO_UNIFIED is imported if used by convert_to_serializable or related logic
-from audio_emotion_processor import audio_processing_loop, record_audio
-from video_emotion_processor import process_video
+from app.audio_processor import audio_processing_loop, record_audio
+from app.video_processor import process_video
 
 # Suppress DeepFace logging for cleaner console output
 logging.getLogger('deepface').setLevel(logging.ERROR)
