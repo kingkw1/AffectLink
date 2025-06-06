@@ -23,8 +23,8 @@ import threading
 import numpy as np
 
 from constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS, TEXT_TO_UNIFIED # Ensure TEXT_TO_UNIFIED is imported if used by convert_to_serializable or related logic
-from app.audio_processor import audio_processing_loop, record_audio
-from app.video_processor import process_video
+from audio_processor import audio_processing_loop, record_audio
+from video_processor import process_video
 
 # Suppress DeepFace logging for cleaner console output
 logging.getLogger('deepface').setLevel(logging.ERROR)
@@ -359,6 +359,8 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     # Create audio analysis data structures
     # audio_emotion_log = [] # Removed, now part of shared_state
     audio_lock = threading.Lock()
+
+    use_whisper_api_toggle = True # Set to True to use API, False for local
     
     # Start audio processing thread with error handling
     print("Starting audio processing thread...")
@@ -368,7 +370,8 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
             args=(shared_state, audio_lock, 
                   whisper_model, text_classifier, 
                   audio_classifier, audio_feature_extractor, 
-                  device, video_started_event)
+                  device, video_started_event,
+                  use_whisper_api_toggle)
         )
         audio_processing_thread.daemon = True
         audio_processing_thread.start()

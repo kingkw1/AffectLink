@@ -11,6 +11,8 @@ import librosa
 import torch
 import tempfile
 import logging  # Added for local logger
+import requests
+import base64
 
 from constants import SER_TO_UNIFIED, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS, AUDIO_CHUNK_SIZE, AUDIO_SAMPLE_RATE
 # Removed: from main_processor import logger, shared_state
@@ -21,9 +23,67 @@ logger = logging.getLogger(__name__)
 # Initialize audio buffer with a fixed size
 audio_buffer = deque(maxlen=AUDIO_CHUNK_SIZE * AUDIO_SAMPLE_RATE)
 
+WHISPER_API_URL = "https://localhost:60049/invocations"
+
+def transcribe_audio_whisper_api(audio_path, api_url):
+    """
+    Transcribe audio file using the deployed Whisper API.
+    """
+    try:
+        if not os.path.exists(audio_path):
+            logger.warning(f"Audio file missing for API transcription: {audio_path}")
+            return None
+
+        # Read audio file and encode as base64
+        with open(audio_path, 'rb') as audio_file:
+            audio_bytes = audio_file.read()
+            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "inputs": {
+                "audio_base64": [audio_base64]
+            }
+        }
+
+        logger.info(f"Sending audio to Whisper API at {api_url}...")
+        start_time = time.time()
+        # Use verify=False for localhost/self-signed certs during development
+        response = requests.post(api_url, headers=headers, json=payload, verify=False)
+        response_time = time.time() - start_time
+
+        if response.status_code == 200:
+            predictions = response.json().get('predictions', [])
+            if predictions and len(predictions) > 0 and 'transcription' in predictions[0]:
+                transcribed_text = predictions[0]['transcription'].strip()
+                logger.info(f"API Transcription successful in {response_time:.2f}s: '{transcribed_text}'")
+                return transcribed_text
+            else:
+                logger.error(f"API response missing 'transcription' in predictions: {response.json()}")
+                return None
+        else:
+            logger.error(f"Whisper API call failed with status code {response.status_code}: {response.text}")
+            return None
+
+    except requests.exceptions.ConnectionError as ce:
+        logger.error(f"Connection error to Whisper API at {api_url}: {ce}")
+        return None
+    except requests.exceptions.Timeout as te:
+        logger.error(f"Timeout connecting to Whisper API at {api_url}: {te}")
+        return None
+    except requests.exceptions.RequestException as re:
+        logger.error(f"Request error to Whisper API at {api_url}: {re}")
+        return None
+    except Exception as e:
+        logger.error(f"Error during Whisper API transcription: {e}")
+        logger.error(traceback.format_exc())
+        return None
+    
 def transcribe_audio_whisper(audio_path, whisper_model):
     """
-    Transcribe audio file using Whisper.
+    Transcribe audio file using Whisper locally.
     """
     try:
         # Generate a truly unique ID for this transcription attempt
@@ -35,7 +95,7 @@ def transcribe_audio_whisper(audio_path, whisper_model):
         unique_string = f"{audio_path}_{current_time_ms}_{random_salt}_{process_id}_{audio_file_size}"
         transcription_id = hashlib.md5(unique_string.encode()).hexdigest()[:8]
 
-        logger.info(f"[{transcription_id}] Starting transcription of {audio_path} at {current_time_ms}")
+        logger.info(f"[{transcription_id}] Starting local transcription of {audio_path} at {current_time_ms}")
 
         if not os.path.exists(audio_path):
             logger.warning(f"[{transcription_id}] Audio file missing: {audio_path}")
@@ -130,7 +190,7 @@ def transcribe_audio_whisper(audio_path, whisper_model):
                 return "RESET_BUFFER"
         else:
             # Reset repeat counter when we get different text
-            transcribe_audio_whisper.repeat_count = 0                # Store for comparison next time
+            transcribe_audio_whisper.repeat_count = 0             # Store for comparison next time
             transcribe_audio_whisper.last_transcription = transcribed_text
 
             # Log detailed results
@@ -149,7 +209,7 @@ def transcribe_audio_whisper(audio_path, whisper_model):
 
         return transcribed_text
     except Exception as e:
-        logger.error(f"Transcription error: {e}")
+        logger.error(f"Local Transcription error: {e}")
         logger.error(traceback.format_exc())
         return None
 
@@ -390,7 +450,7 @@ def moving_average(scores):
 
 
 # Emotion categories for unified mapping
-def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, ser_model, ser_processor, device, video_started_event):
+def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, ser_model, ser_processor, device, video_started_event, use_whisper_api: bool = True):
     """Process audio for speech-to-text and emotion analysis"""
     global audio_buffer  # Only audio_buffer is global now
     logger.info("Audio processing thread started")
@@ -445,9 +505,15 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, s
                 else:
                     logger.warning("APL_PRE_TRANSCRIPTION_AUDIO: No audio data or empty audio data before transcription attempt.")
 
-                # Transcribe audio to text
+                # Transcribe audio to text based on the toggle
                 logger.debug("Transcribing audio...")
-                text = transcribe_audio_whisper(temp_wav, whisper_model)
+                if use_whisper_api: # <--- CONDITIONAL LOGIC FOR WHISPER API
+                    logger.info("Using Whisper API for transcription.")
+                    text = transcribe_audio_whisper_api(temp_wav, WHISPER_API_URL)
+                else:
+                    logger.info("Using local Whisper model for transcription.")
+                    text = transcribe_audio_whisper(temp_wav, whisper_model) # Existing local call
+
                 logger.info(f"Whisper output: '{text}'") # Added log
 
                 # Handle transcription results and buffer resets
@@ -529,9 +595,9 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, s
                     if text_emotion_scores_raw and isinstance(text_emotion_scores_raw, list) and \
                        len(text_emotion_scores_raw) > 0 and isinstance(text_emotion_scores_raw[0], list) and \
                        len(text_emotion_scores_raw[0]) > 0:
-                        
+
                         actual_scores_to_process = text_emotion_scores_raw[0] # Extract the inner list
-                        
+
                         # Get unified text scores
                         unified_text_scores = _create_and_normalize_unified_scores(
                             actual_scores_to_process, TEXT_TO_UNIFIED, UNIFIED_EMOTIONS
@@ -551,22 +617,22 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, s
                             shared_state['text_emotion'] = (dominant_text_emotion, confidence)
                             logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({dominant_text_emotion}, {confidence:.2f})") # Log update
                             unified_text_emotion = dominant_text_emotion # Update for smoothing
-                            text_score = confidence                 # Update for smoothing
+                            text_score = confidence              # Update for smoothing
                         else:
                             logger.warning(f"Unified text scores are empty, all zero, or invalid after normalization: {unified_text_scores}")
                             shared_state['text_emotion'] = ("unknown", 0.0)
-                            unified_text_emotion = "unknown" 
-                            text_score = 0.0                 
+                            unified_text_emotion = "unknown"
+                            text_score = 0.0
                     else:
                         logger.warning(f"Text classifier returned no valid scores or unexpected format: {text_emotion_scores_raw}")
                         shared_state['text_emotion'] = ("unknown", 0.0)
-                        unified_text_emotion = "unknown" 
-                        text_score = 0.0                 
+                        unified_text_emotion = "unknown"
+                        text_score = 0.0
                 else:
                     logger.warning(f"Skipping text emotion classification because text is invalid or placeholder: '{text}'")
                     shared_state['text_emotion'] = ("unknown", 0.0)
-                    unified_text_emotion = "unknown" 
-                    text_score = 0.0                 
+                    unified_text_emotion = "unknown"
+                    text_score = 0.0
 
                 # Get audio emotion scores - using improved function
                 logger.debug("Analyzing audio emotion...")
