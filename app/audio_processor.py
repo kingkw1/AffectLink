@@ -27,11 +27,13 @@ audio_buffer = deque(maxlen=AUDIO_CHUNK_SIZE * AUDIO_SAMPLE_RATE)
 THIS MEANS THAT THIS MUST BE SET IN POWERSHELL WITH THE FOLLOWING:
 
 $env:AFFECTLINK_WHISPER_API_URL="https://localhost:9600/invocations"
+$env:AFFECTLINK_SER_API_URL="https://localhost:56651/invocations"
 
 Together with the os.genv line, this accomplishes the same as the previous hardcoded URL.
     WHISPER_API_URL = "https://localhost:60049/invocations"
 '''
 WHISPER_API_URL = os.getenv("AFFECTLINK_WHISPER_API_URL", "https://localhost:60049/invocations")
+SER_API_URL = os.getenv("AFFECTLINK_SER_API_URL", "https://localhost:55853/invocations") 
 
 def transcribe_audio_whisper_api(audio_path, api_url):
     """
@@ -88,6 +90,78 @@ def transcribe_audio_whisper_api(audio_path, api_url):
         logger.error(f"Error during Whisper API transcription: {e}")
         logger.error(traceback.format_exc())
         return None
+
+
+def analyze_audio_emotion_ser_api(audio_path, api_url):
+    """
+    Analyze audio file for emotion using the deployed SER API.
+    Returns dominant emotion, its score, and a list of all emotion scores.
+    """
+    try:
+        if not os.path.exists(audio_path):
+            logger.warning(f"Audio file missing for SER API analysis: {audio_path}")
+            return "unknown", 0.0, []
+
+        # Read audio file and encode as base64
+        with open(audio_path, 'rb') as audio_file:
+            audio_bytes = audio_file.read()
+            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+        
+        # This payload matches the 'dataframe_records' format that worked
+        payload = {
+            "dataframe_records": [
+                {
+                    "audio_base64": audio_base64
+                }
+            ]
+        }
+
+        logger.info(f"Sending audio to SER API at {api_url} for emotion analysis...")
+        start_time = time.time()
+        # Use verify=False for localhost/self-signed certs during development
+        response = requests.post(api_url, headers=headers, json=payload, verify=False)
+        response_time = time.time() - start_time
+
+        if response.status_code == 200:
+            predictions = response.json().get('predictions', [])
+            if predictions and len(predictions) > 0 and 'dominant_audio_emotion' in predictions[0]:
+                dominant_emotion = predictions[0]['dominant_audio_emotion'].strip()
+                
+                # The SER API currently only returns the dominant emotion.
+                # To be consistent with analyze_audio_emotion_full's return signature
+                # (dominant_emotion, score, full_results), we'll provide placeholder
+                # values for score and full_results. If your API ever returns more,
+                # you'd update this parsing logic.
+                score = 1.0 # Assuming 100% confidence if it's the only one returned
+                full_results = [{"emotion": dominant_emotion, "score": score}]
+
+                logger.info(f"SER API analysis successful in {response_time:.2f}s: Dominant emotion: '{dominant_emotion}'")
+                return dominant_emotion, score, full_results
+            else:
+                logger.error(f"SER API response missing 'dominant_audio_emotion' in predictions: {response.json()}")
+                return "unknown", 0.0, []
+        else:
+            logger.error(f"SER API call failed with status code {response.status_code}: {response.text}")
+            return "unknown", 0.0, []
+
+    except requests.exceptions.ConnectionError as ce:
+        logger.error(f"Connection error to SER API at {api_url}: {ce}")
+        return "unknown", 0.0, []
+    except requests.exceptions.Timeout as te:
+        logger.error(f"Timeout connecting to SER API at {api_url}: {te}")
+        return "unknown", 0.0, []
+    except requests.exceptions.RequestException as re:
+        logger.error(f"Request error to SER API at {api_url}: {re}")
+        return "unknown", 0.0, []
+    except Exception as e:
+        logger.error(f"Error during SER API analysis: {e}")
+        logger.error(traceback.format_exc())
+        return "unknown", 0.0, []
+    
     
 def transcribe_audio_whisper(audio_path, whisper_model):
     """
@@ -458,7 +532,7 @@ def moving_average(scores):
 
 
 # Emotion categories for unified mapping
-def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, ser_model, ser_processor, device, video_started_event, use_whisper_api: bool = True):
+def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, ser_model, ser_processor, device, video_started_event, use_whisper_api: bool = True, use_ser_api: bool = True):
     """Process audio for speech-to-text and emotion analysis"""
     global audio_buffer  # Only audio_buffer is global now
     logger.info("Audio processing thread started")
@@ -642,17 +716,20 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, classifier, s
                     unified_text_emotion = "unknown"
                     text_score = 0.0
 
-                # Get audio emotion scores - using improved function
+                # Get audio emotion scores
                 logger.debug("Analyzing audio emotion...")
                 try:
-                    # Use direct analyze_audio_emotion for simplicity
-                    # CHANGED to analyze_audio_emotion_full
-                    raw_audio_emotion, audio_score, audio_emotions_full_results = analyze_audio_emotion_full(temp_wav, ser_model, ser_processor)
+                    if use_ser_api: # <--- NEW CONDITIONAL LOGIC FOR SER API
+                        logger.info("Using SER API for audio emotion analysis.")
+                        raw_audio_emotion, audio_score, audio_emotions_full_results = analyze_audio_emotion_ser_api(temp_wav, SER_API_URL)
+                    else:
+                        logger.info("Using local SER model for audio emotion analysis.")
+                        raw_audio_emotion, audio_score, audio_emotions_full_results = analyze_audio_emotion_full(temp_wav, ser_model, ser_processor)
 
                     # Initialize unified_audio_emotion for broader scope
                     unified_audio_emotion = "unknown"
 
-                    if raw_audio_emotion and audio_score is not None: # Check audio_score is not None explicitly
+                    if raw_audio_emotion and audio_score is not None:
                         # Map raw SER emotion to unified emotion
                         unified_audio_emotion = SER_TO_UNIFIED.get(raw_audio_emotion, "unknown")
 
