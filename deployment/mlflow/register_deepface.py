@@ -6,6 +6,8 @@ import numpy as np
 from mlflow.models.signature import ModelSignature
 from mlflow.types.schema import Schema, TensorSpec
 
+# Note: deepface requires one of the linux libraries installed with sudo apt-get
+
 # Set up logging for clearer output
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)

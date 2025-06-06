@@ -1,0 +1,4 @@
+DeepFace
+tf-keras
+opencv-python
+transformers
