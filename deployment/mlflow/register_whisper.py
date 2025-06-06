@@ -343,7 +343,6 @@ def register_whisper_model_with_ffmpeg_bundle():
     temp_audio_for_input_example_dir = tempfile.mkdtemp() 
 
     try:
-        # ... (your existing ffmpeg copying logic) ...
         shutil.copy(LOCAL_FFMPEG_PATH, os.path.join(temp_ffmpeg_dir, "ffmpeg"))
         logger.info(f"Copied ffmpeg executable to: {temp_ffmpeg_dir}")
 
