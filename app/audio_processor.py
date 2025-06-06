@@ -23,7 +23,15 @@ logger = logging.getLogger(__name__)
 # Initialize audio buffer with a fixed size
 audio_buffer = deque(maxlen=AUDIO_CHUNK_SIZE * AUDIO_SAMPLE_RATE)
 
-WHISPER_API_URL = "https://localhost:60049/invocations"
+'''
+THIS MEANS THAT THIS MUST BE SET IN POWERSHELL WITH THE FOLLOWING:
+
+$env:AFFECTLINK_WHISPER_API_URL="https://localhost:9600/invocations"
+
+Together with the os.genv line, this accomplishes the same as the previous hardcoded URL.
+    WHISPER_API_URL = "https://localhost:60049/invocations"
+'''
+WHISPER_API_URL = os.getenv("AFFECTLINK_WHISPER_API_URL", "https://localhost:60049/invocations")
 
 def transcribe_audio_whisper_api(audio_path, api_url):
     """
