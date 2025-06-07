@@ -152,7 +152,6 @@ def analyze_audio_emotion_ser_api(audio_path, api_url):
             logger.warning(f"Audio file missing for SER API analysis: {audio_path}")
             return "unknown", 0.0, []
 
-        # Read audio file and encode as base64
         with open(audio_path, 'rb') as audio_file:
             audio_bytes = audio_file.read()
             audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
@@ -161,7 +160,6 @@ def analyze_audio_emotion_ser_api(audio_path, api_url):
             "Content-Type": "application/json",
         }
         
-        # This payload matches the 'dataframe_records' format that worked
         payload = {
             "dataframe_records": [
                 {
@@ -177,22 +175,24 @@ def analyze_audio_emotion_ser_api(audio_path, api_url):
         response_time = time.time() - start_time
 
         if response.status_code == 200:
+            # The API now returns a JSON object with a 'predictions' key,
+            # which is a list of dictionaries (one for each input audio).
+            # Each dictionary contains 'dominant_audio_emotion', 'dominant_audio_emotion_score',
+            # and 'full_audio_emotion_scores'.
             predictions = response.json().get('predictions', [])
-            if predictions and len(predictions) > 0 and 'dominant_audio_emotion' in predictions[0]:
-                dominant_emotion = predictions[0]['dominant_audio_emotion'].strip()
+            
+            if predictions and len(predictions) > 0:
+                # Assuming we send one audio chunk at a time, we'll take the first prediction.
+                first_prediction = predictions[0]
                 
-                # The SER API currently only returns the dominant emotion.
-                # To be consistent with analyze_audio_emotion_full's return signature
-                # (dominant_emotion, score, full_results), we'll provide placeholder
-                # values for score and full_results. If your API ever returns more,
-                # you'd update this parsing logic.
-                score = 1.0 # Assuming 100% confidence if it's the only one returned
-                full_results = [{"emotion": dominant_emotion, "score": score}]
+                dominant_emotion = first_prediction.get('dominant_audio_emotion', 'unknown').strip()
+                score = first_prediction.get('dominant_audio_emotion_score', 0.0)
+                full_results = first_prediction.get('full_audio_emotion_scores', []) # This will be the list of dicts
 
-                logger.info(f"SER API analysis successful in {response_time:.2f}s: Dominant emotion: '{dominant_emotion}'")
+                logger.info(f"SER API analysis successful in {response_time:.2f}s: Dominant emotion: '{dominant_emotion}' (Score: {score:.4f})")
                 return dominant_emotion, score, full_results
             else:
-                logger.error(f"SER API response missing 'dominant_audio_emotion' in predictions: {response.json()}")
+                logger.error(f"SER API response missing valid predictions or empty: {response.json()}")
                 return "unknown", 0.0, []
         else:
             logger.error(f"SER API call failed with status code {response.status_code}: {response.text}")

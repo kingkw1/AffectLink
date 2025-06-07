@@ -1,2 +1,4 @@
 librosa
 transformers==4.40.2
+resampy
+accelerate

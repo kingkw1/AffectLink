@@ -3,7 +3,7 @@ import json
 import base64
 import os
 import time
-import numpy as np # Still needed for potential audio processing utilities
+import numpy as np
 from dotenv import load_dotenv
 
 # Load environment variables (if you have them)
@@ -11,9 +11,10 @@ load_dotenv()
 
 # --- Configuration ---
 # Update this to your SER model's deployed URL
-MLFLOW_SERVING_URL = os.getenv("MLFLOW_SER_URL", "https://localhost:55853")
-ENDPOINT = "/invocations"
-FULL_URL = f"{MLFLOW_SERVING_URL}{ENDPOINT}"
+# Make sure this is ONLY the base URL (e.g., "https://localhost:55853" or "https://your-server:port")
+MLFLOW_SERVING_URL = os.getenv("AFFECTLINK_SER_API_URL", "https://localhost:55853") # REMOVED '/invocations' from default
+ENDPOINT = "/invocations" # This is the standard MLflow prediction endpoint
+FULL_URL = f"{MLFLOW_SERVING_URL}"
 
 # Path to your local sample audio file that you want to send
 # This is the path on YOUR LOCAL MACHINE where you run this test script.
@@ -40,17 +41,15 @@ if __name__ == "__main__":
         exit(1)
 
     # Construct payload
-    # Change payload structure to 'dataframe_records' format
     payload = {
-        "dataframe_records": [ # Use 'dataframe_records'
+        "dataframe_records": [
             {
-                "audio_base64": audio_base64_string # Each dict is a row
+                "audio_base64": audio_base64_string
             }
         ]
     }
 
     print(f"Sending request to: {FULL_URL}")
-    # Print only a snippet of the base64 string for readability
     base64_snippet = audio_base64_string[:50] + "..." + audio_base64_string[-10:]
     print(f"Payload (audio_base64 snippet): {base64_snippet}")
 
@@ -60,15 +59,17 @@ if __name__ == "__main__":
 
     try:
         start_time = time.time()
-        # Use verify=False if you are using self-signed certificates (common for localhost HTTPS or self-signed certs from HP AI Studio)
         response = requests.post(FULL_URL, headers=headers, data=json.dumps(payload), verify=False)
         end_time = time.time()
 
         print("\n--- Model Invocation Successful ---")
         print(f"Response Status Code: {response.status_code}")
         print(f"Response Time: {end_time - start_time:.2f} seconds")
-        print("Response JSON:")
+        
         response_json = response.json()
+        
+        # --- NEW: Print the full response JSON ---
+        print("\nFull Response JSON:")
         print(json.dumps(response_json, indent=2))
 
         if response.status_code == 200:
@@ -76,16 +77,28 @@ if __name__ == "__main__":
                 prediction_data = response_json["predictions"]
                 
                 if isinstance(prediction_data, list) and len(prediction_data) > 0:
-                    if isinstance(prediction_data[0], dict) and "dominant_audio_emotion" in prediction_data[0]:
-                        dominant_emotion = prediction_data[0]["dominant_audio_emotion"]
-                        print(f"\nDominant Audio Emotion: {dominant_emotion}")
-                    elif isinstance(prediction_data[0], str):
-                        dominant_emotion = prediction_data[0]
-                        print(f"\nDominant Audio Emotion: {dominant_emotion}")
+                    first_prediction = prediction_data[0] # Assuming one audio sample per request
+                    if isinstance(first_prediction, dict):
+                        dominant_emotion = first_prediction.get("dominant_audio_emotion")
+                        dominant_score = first_prediction.get("dominant_audio_emotion_score")
+                        full_scores = first_prediction.get("full_audio_emotion_scores")
+                        raw_logits = first_prediction.get("raw_logits") # NEW
+                        softmax_probs = first_prediction.get("softmax_probabilities") # NEW
+
+                        print(f"\n--- Detailed Prediction Results ---")
+                        print(f"Dominant Audio Emotion: {dominant_emotion}")
+                        print(f"Dominant Audio Emotion Score: {dominant_score:.4f}")
+                        print(f"Full Audio Emotion Scores: {json.dumps(full_scores, indent=2)}")
+                        
+                        if raw_logits is not None:
+                            print(f"Raw Logits: {raw_logits}") # Print as is, already a list
+                        if softmax_probs is not None:
+                            print(f"Softmax Probabilities: {softmax_probs}") # Print as is, already a list
+                        
                     else:
-                        print(f"Unexpected prediction format: {prediction_data}")
+                        print(f"Unexpected prediction format in first item: {first_prediction}")
                 else:
-                    print("Response does not contain valid predictions.")
+                    print("Response does not contain valid predictions list or it is empty.")
             else:
                 print("Response does not contain 'predictions' key or predictions are empty.")
         else:
