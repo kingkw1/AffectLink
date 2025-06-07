@@ -362,6 +362,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
 
     use_whisper_api_toggle = True # Set to True to use API, False for local
     use_ser_api_toggle = True # Set to True to use API, False for local
+    use_text_classifier_api_toggle = True # <--- NEW TOGGLE: Set to True to use API, False for local
 
     # Start audio processing thread with error handling
     print("Starting audio processing thread...")
@@ -369,11 +370,13 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
         audio_processing_thread = threading.Thread(
             target=audio_processing_loop,
             args=(shared_state, audio_lock, 
-                  whisper_model, text_classifier, 
+                  whisper_model, text_classifier, # text_emotion_classifier is still passed for local use
                   audio_classifier, audio_feature_extractor, 
                   device, video_started_event,
                   use_whisper_api_toggle,
-                  use_ser_api_toggle)
+                  use_ser_api_toggle,
+                  use_text_classifier_api_toggle, 
+                  )
         )
         audio_processing_thread.daemon = True
         audio_processing_thread.start()
