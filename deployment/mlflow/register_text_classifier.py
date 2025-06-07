@@ -1,54 +1,34 @@
 import mlflow
-import whisper
-from transformers import pipeline, AutoModelForAudioClassification, AutoFeatureExtractor
-from deepface import DeepFace
-from deepface.modules import modeling # Keep this import!
-import tensorflow as tf
-import sys
-import subprocess
+from transformers import pipeline # Only pipeline is strictly needed for this model
 import logging
-import numpy as np # Import numpy for array creation
-import os
-
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Dropout # Added Dropout
+import torch # Import torch as the model is PyTorch-based
 from mlflow.models.signature import ModelSignature
 from mlflow.types.schema import Schema, TensorSpec
+import numpy as np
 
 # Set up logging for clearer output
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Configuration for MLflow ---
-# If HP AI Studio has a central MLflow server, ensure MLFLOW_TRACKING_URI is set
-# in your environment before running this script.
-# Example (run this in your terminal):
-# export MLFLOW_TRACKING_URI="http://your-hp-ai-studio-mlflow-server:5000"
-# If not set, MLflow will default to './mlruns' in the current working directory.
-
-# --- Model IDs from detect_emotion.py or your setup ---
+# --- Model IDs ---
 TEXT_CLASSIFIER_MODEL_ID = "j-hartmann/emotion-english-distilroberta-base"
-SER_MODEL_ID = "superb/hubert-large-superb-er"
-WHISPER_MODEL_SIZE = "base" # As used in whisper.load_model()
+REGISTERED_MODEL_NAME = "TextEmotionClassifierModel" # Consistent name for registered model
 
-# --- Utility to get pip requirements ---
-def get_pip_requirements():
-    """Captures the current Python environment's installed packages for MLflow."""
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "freeze"],
-            capture_output=True,
-            text=True,
-            check=True # Raise an error for non-zero exit codes
-        )
-        # Filter out editable packages if necessary
-        return [line for line in result.stdout.splitlines() if not line.startswith('-e')]
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to get pip requirements: {e}")
-        return []
+# --- Explicit Pip Requirements for Text Emotion Model Deployment ---
+# These are the minimal requirements for running the Hugging Face text-classification pipeline
+# using the PyTorch backend.
+TEXT_EMOTION_MODEL_PIP_REQUIREMENTS = [
+    "transformers",
+    "torch", # Model uses PyTorch backend
+    # You might consider adding specific versions if you encounter issues:
+    # f"transformers=={transformers.__version__}",
+    # f"torch=={torch.__version__}",
+    "mlflow", # Required for MLflow to run the model
+    "accelerate", # Often a beneficial dependency for transformers for performance
+]
 
 # --- Main Registration Logic ---
-def register_affectlink_models():
+def register_text_classifier_model(): # Renamed function for clarity
     # Set the experiment name before starting the run
     mlflow.set_experiment("AffectLink_Model_Registration")
 
@@ -56,75 +36,51 @@ def register_affectlink_models():
     with mlflow.start_run() as run:
         logger.info(f"MLflow Run ID: {run.info.run_id}")
 
-        # Get common pip requirements for all models.
-        # This can be refined to be more specific per model if needed.
-        pip_requirements = get_pip_requirements()
-        if not pip_requirements:
-            logger.warning("Could not gather pip requirements. Model reproducibility might be affected.")
-
-        # 2. Register Whisper ASR Model
-        logger.info(f"Loading and registering Whisper '{WHISPER_MODEL_SIZE}' ASR Model...")
-        try:
-            # Whisper loads a PyTorch model.
-            whisper_model = whisper.load_model(WHISPER_MODEL_SIZE)
-
-            # Log the PyTorch model. mlflow.pytorch is suitable here.
-            # If you were loading a Hugging Face model/pipeline *directly* via AutoModelForSpeechSeq2Seq,
-            # mlflow.transformers would be even more ideal, but for `whisper.load_model`, PyTorch flavor works.
-            mlflow.pytorch.log_model(
-                pytorch_model=whisper_model,
-                artifact_path=f"whisper_asr_model_{WHISPER_MODEL_SIZE}",
-                registered_model_name=f"WhisperASRModel_{WHISPER_MODEL_SIZE}",
-                pip_requirements=pip_requirements
-            )
-            logger.info(f"Registered Whisper '{WHISPER_MODEL_SIZE}' ASR Model.")
-        except Exception as e:
-            logger.error(f"Failed to register Whisper ASR Model: {e}")
-
-        # 3. Register Text Emotion Classification Model (Hugging Face Pipeline)
+        # Register Text Emotion Classification Model (Hugging Face Pipeline)
         logger.info(f"Loading and registering Text Emotion Model ({TEXT_CLASSIFIER_MODEL_ID})...")
         try:
-            # Load the text emotion pipeline directly from Hugging Face
-            text_emotion_pipeline = pipeline("sentiment-analysis", model=TEXT_CLASSIFIER_MODEL_ID)
+            # 1. Load the text emotion pipeline directly from Hugging Face
+            # Important: The task is "text-classification" for this model, not "sentiment-analysis"
+            # Setting top_k=None ensures we get all emotion scores back.
+            text_emotion_pipeline = pipeline(
+                "text-classification",
+                model=TEXT_CLASSIFIER_MODEL_ID,
+                top_k=None # Ensure all emotion scores are returned
+            )
+            logger.info("Text emotion pipeline loaded successfully locally.")
 
-            # mlflow.transformers is specifically designed for Hugging Face models and pipelines
+            # 2. Define the model signature
+            # Input schema: a list of strings (text)
+            input_schema = Schema([
+                TensorSpec(np.dtype(str), (-1,), name="text") # -1 for variable batch size
+            ])
+            # Output schema: This is tricky for a pipeline, as it returns complex JSON.
+            # We'll define it as a generic JSON for simplicity, or omit if mlflow.transformers handles it.
+            # mlflow.transformers usually handles this well. For robustness, we can define a generic output.
+            output_schema = Schema([
+                TensorSpec(np.dtype(str), (-1,), name="predictions") # Output will be stringified JSON
+            ])
+            signature = ModelSignature(inputs=input_schema, outputs=output_schema)
+
+            # 3. Log the model using mlflow.transformers.log_model
+            # This function is specifically designed for Hugging Face models and pipelines.
+            # It automatically saves the tokenizer, model, and configuration.
             mlflow.transformers.log_model(
                 transformers_model=text_emotion_pipeline,
                 artifact_path="text_emotion_classifier_model",
-                registered_model_name="TextEmotionClassifierModel",
-                pip_requirements=pip_requirements
+                registered_model_name=REGISTERED_MODEL_NAME,
+                pip_requirements=TEXT_EMOTION_MODEL_PIP_REQUIREMENTS,
+                # Setting `inference_config` is important for deployments that use the pipeline's predict method.
+                # It should define the task.
+                inference_config={"task": "text-classification", "model": TEXT_CLASSIFIER_MODEL_ID, "top_k": None},
+                # signature=signature # mlflow.transformers usually infers a good signature
             )
-            logger.info(f"Registered Text Emotion Model ({TEXT_CLASSIFIER_MODEL_ID}).")
+            logger.info(f"Registered Text Emotion Model as '{REGISTERED_MODEL_NAME}'.")
         except Exception as e:
             logger.error(f"Failed to register Text Emotion Model: {e}")
-
-        # 4. Register Audio Emotion Classification Model (Hugging Face AutoModel)
-        logger.info(f"Loading and registering Audio Emotion Model ({SER_MODEL_ID})...")
-        try:
-            # Load the model and its associated feature extractor
-            audio_emotion_model = AutoModelForAudioClassification.from_pretrained(SER_MODEL_ID)
-            feature_extractor = AutoFeatureExtractor.from_pretrained(SER_MODEL_ID)
-            
-            # Create a simple wrapper dictionary for the transformers model and its components
-            # This allows mlflow.transformers to save the entire context (model + feature_extractor)
-            transformers_model_dict = {
-                "model": audio_emotion_model,
-                "feature_extractor": feature_extractor
-            }
-
-            mlflow.transformers.log_model(
-                transformers_model=transformers_model_dict,
-                artifact_path="audio_emotion_classifier_model",
-                registered_model_name="AudioEmotionClassifierModel",
-                pip_requirements=pip_requirements
-            )
-            logger.info(f"Registered Audio Emotion Model ({SER_MODEL_ID}).")
-        except Exception as e:
-            logger.error(f"Failed to register Audio Emotion Model: {e}")
-
-        logger.info("All specified models attempted for registration.")
+            logger.error(f"Error details: {e}", exc_info=True) # Log full traceback
 
 if __name__ == "__main__":
     logger.info("Starting MLflow model registration process...")
-    register_affectlink_models()
+    register_text_classifier_model()
     logger.info("MLflow model registration process completed.")
