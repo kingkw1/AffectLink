@@ -29,13 +29,9 @@ import numpy as np
 import time
 import threading
 import queue
-from collections import deque
-import os
 import sys
-import multiprocessing
 from multiprocessing.queues import Empty as MPQueueEmpty
-import pandas as pd
-import plotly.express as px
+import queue  # Local placeholder
 
 # Initialize session state variables at the very beginning
 if 'enable_video' not in st.session_state:
@@ -65,7 +61,6 @@ if current_dir not in sys.path:
 # Dev mode flag for standalone testing
 DEV_MODE = True if __name__ == "__main__" else False
 
-import queue  # Local placeholder
 # Global queues, will be set in main()
 video_frame_queue = None
 emotion_data_queue = None
@@ -401,10 +396,6 @@ def display_loading_indicator():
 # Define metrics and containers for displaying results
 video_placeholder = st.empty()
 overall_emotion_container = st.empty()
-# transcribed_text_area = st.empty() # This was moved to be text_container in the layout
-facial_plot_area = st.empty() # Initialize facial_plot_area
-audio_plot_area = st.empty()  # Ensure audio_plot_area is initialized
-text_plot_area = st.empty()   # Ensure text_plot_area is initialized
 facial_emotion_container = None
 text_emotion_container = None
 audio_emotion_container = None
@@ -441,7 +432,7 @@ def update_metrics():
         text_emotion_name_smoothed = text_emotion_data_smoothed.get("emotion", "unknown")
         text_emotion_score_smoothed = text_emotion_data_smoothed.get("confidence", 0.0)
         text_emotion_container.metric(
-            label="Text Emotion (Smoothed)",
+            label="Verbal Emotion (Text)",
             value=f"{text_emotion_name_smoothed.capitalize()}",
             delta=f"{text_emotion_score_smoothed:.2f}",
             help="Smoothed dominant text-based emotion and confidence score."
@@ -451,7 +442,7 @@ def update_metrics():
         audio_emotion_name_smoothed = audio_emotion_data_smoothed.get("emotion", "unknown")
         audio_emotion_score_smoothed = audio_emotion_data_smoothed.get("confidence", 0.0)
         audio_emotion_container.metric(
-            label="Audio Emotion (Smoothed)",
+            label="Voice Emotion (SER)",
             value=f"{audio_emotion_name_smoothed.capitalize()}",
             delta=f"{audio_emotion_score_smoothed:.2f}",
             help="Smoothed dominant audio-based emotion (SER) and confidence score."
@@ -483,57 +474,6 @@ def update_metrics():
             delta=f"Cosine Sim: {cosine_sim:.2f}",
             help="Consistency between facial and text emotion vectors."
         )
-
-        # Update Plots
-        # Facial Emotion Full Scores Plot
-        # facial_scores = latest_data.get("facial_emotion_full_scores", {})
-        # if facial_scores and isinstance(facial_scores, dict) and any(facial_scores.values()):
-        #     # Ensure scores are Python floats
-        #     facial_scores_py = {k: float(v) for k, v in facial_scores.items()}
-        #     df_facial = pd.DataFrame(list(facial_scores_py.items()), columns=['Emotion', 'Score']).sort_values(by='Score', ascending=False)
-        #     fig_facial = px.bar(df_facial, x='Emotion', y='Score', title='Facial Emotion Distribution', color='Emotion', color_discrete_map=EMOTION_COLORS)
-        #     fig_facial.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
-        #     facial_plot_area.plotly_chart(fig_facial, use_container_width=True)
-        # else:
-        #     facial_plot_area.empty()
-
-
-        # Audio Emotion Full Scores Plot (SER)
-        # audio_scores_list = latest_data.get("audio_emotion_full_scores", [])
-        # if audio_scores_list and isinstance(audio_scores_list, list) and len(audio_scores_list) > 0:
-        #     # Ensure scores are Python floats
-        #     audio_scores_py = [{"emotion": item.get("emotion", "unknown"), "score": float(item.get("score", 0.0))} for item in audio_scores_list]
-        #     df_audio = pd.DataFrame(audio_scores_py).sort_values(by='score', ascending=False)
-        #     if not df_audio.empty:
-        #         fig_audio = px.bar(df_audio, x='emotion', y='score', title='Audio Emotion (SER) Distribution', color='emotion', color_discrete_map=EMOTION_COLORS)
-        #         fig_audio.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
-        #         audio_plot_area.plotly_chart(fig_audio, use_container_width=True)
-        #     else:
-        #         audio_plot_area.empty()
-        # else:
-        #     audio_plot_area.empty()
-        audio_plot_area.empty() # Commented out as per request
-
-        # Text Emotion Full Scores (from text_emotion_history, last entry)
-        # text_history = latest_data.get("text_emotion_history", [])
-        # if text_history and isinstance(text_history, list) and len(text_history) > 0:
-        #     last_text_scores_entry = text_history[-1] # get the most recent entry
-        #     if isinstance(last_text_scores_entry, dict) and "scores" in last_text_scores_entry:
-        #         text_scores = last_text_scores_entry.get("scores", {})
-        #         if text_scores and isinstance(text_scores, dict) and any(text_scores.values()):
-        #             # Ensure scores are Python floats
-        #             text_scores_py = {k: float(v) for k, v in text_scores.items()}
-        #             df_text = pd.DataFrame(list(text_scores_py.items()), columns=['Emotion', 'Score']).sort_values(by='Score', ascending=False)
-        #             fig_text = px.bar(df_text, x='Emotion', y='Score', title='Text Emotion Distribution (Current Segment)', color='Emotion', color_discrete_map=EMOTION_COLORS)
-        #             fig_text.update_layout(yaxis_title="Confidence", xaxis_title="Emotion")
-        #             text_plot_area.plotly_chart(fig_text, use_container_width=True)
-        #         else:
-        #             text_plot_area.empty()
-        #     else:
-        #         text_plot_area.empty()
-        # else:
-        #     text_plot_area.empty()
-        text_plot_area.empty() # Commented out as per request
 
     except Exception as e:
         # st.error(f"Error updating metrics: {e}") # Avoid st calls if this is run in a thread sometimes
@@ -821,8 +761,6 @@ def restart_audio_thread(enabled=None, queue=None, stop_evt=None):
             print("Audio processing disabled, no thread started") 
         else:
             print("No audio queue available, cannot start thread")
-
-# We're now using the implementations defined above, removing this duplicate definition
 
 # If run directly (for testing)
 if __name__ == "__main__":
