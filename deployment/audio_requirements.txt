@@ -2,3 +2,5 @@ librosa
 transformers==4.40.2
 resampy
 accelerate
+openai-whisper
+tf-keras

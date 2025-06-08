@@ -224,7 +224,7 @@ def register_tone_classifier_model():
                 mlflow.pyfunc.log_model(
                     python_model=SERPyfuncModel(),
                     artifact_path="tonal_classifier_model",
-                    registered_model_name="SpeechEmotionRecognitionModel",
+                    registered_model_name="SERClassifierModel_hubert-large-superb-er",
                     pip_requirements=TONAL_CLASSIFIER_PIP_REQUIREMENTS,
                     signature=signature,
                     input_example=input_example,

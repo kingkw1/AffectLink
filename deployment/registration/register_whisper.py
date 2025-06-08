@@ -392,7 +392,7 @@ def register_whisper_model_with_ffmpeg_bundle():
             mlflow.pyfunc.log_model(
                 python_model=WhisperPyfuncModel(),
                 artifact_path=f"whisper_asr_model_{WHISPER_MODEL_SIZE}",
-                registered_model_name=f"WhisperASRModel_{WHISPER_MODEL_SIZE}",
+                registered_model_name=f"ASRModel_whisper",
                 pip_requirements=WHISPER_PIP_REQUIREMENTS,
                 artifacts=artifacts, 
                 signature=signature,

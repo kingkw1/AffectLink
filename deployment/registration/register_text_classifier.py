@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 # --- Model IDs ---
 TEXT_CLASSIFIER_MODEL_ID = "j-hartmann/emotion-english-distilroberta-base"
-REGISTERED_MODEL_NAME = "TextEmotionClassifierModel" # Consistent name for registered model
 
 # --- Explicit Pip Requirements for Text Emotion Model Deployment ---
 # These are the minimal requirements for running the Hugging Face text-classification pipeline
@@ -68,14 +67,14 @@ def register_text_classifier_model(): # Renamed function for clarity
             mlflow.transformers.log_model(
                 transformers_model=text_emotion_pipeline,
                 artifact_path="text_emotion_classifier_model",
-                registered_model_name=REGISTERED_MODEL_NAME,
+                registered_model_name="TextEmotionClassifierModel_english-distilroberta-base",
                 pip_requirements=TEXT_EMOTION_MODEL_PIP_REQUIREMENTS,
                 # Setting `inference_config` is important for deployments that use the pipeline's predict method.
                 # It should define the task.
                 inference_config={"task": "text-classification", "model": TEXT_CLASSIFIER_MODEL_ID, "top_k": None},
                 # signature=signature # mlflow.transformers usually infers a good signature
             )
-            logger.info(f"Registered Text Emotion Model as '{REGISTERED_MODEL_NAME}'.")
+            logger.info(f"Registered Text Emotion Model as TextEmotionClassifierModel")
         except Exception as e:
             logger.error(f"Failed to register Text Emotion Model: {e}")
             logger.error(f"Error details: {e}", exc_info=True) # Log full traceback

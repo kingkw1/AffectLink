@@ -53,7 +53,7 @@ sudo apt-get install -y ffmpeg
 
 ### Summary of System-Level Installations
 
-To fully prepare your environment for AffectLink, run all these commands in your terminal (or include them in your Dockerfile/setup script):
+To fully prepare your AI Studio environment for AffectLink, run all these commands in your terminal (or include them in your Dockerfile/setup script):
 
 ```bash
 sudo apt-get update
@@ -67,3 +67,6 @@ pip install -r requirements.txt
 ```
 
 These steps should now completely resolve all common dependency-related errors, allowing your AffectLink application to run smoothly and process both facial emotions and audio.
+
+
+### 

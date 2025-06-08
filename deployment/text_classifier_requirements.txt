@@ -1,2 +1,0 @@
-tf-keras
-transformers==4.40.2

@@ -209,7 +209,7 @@ def register_deepface_model():
             mlflow.pyfunc.log_model(
                 python_model=DeepFacePyfuncModel(),
                 artifact_path="deepface_emotion_model",
-                registered_model_name="DeepFaceEmotionModel", # Consistent name
+                registered_model_name="FERClassifierModel_deepface", # Consistent name
                 pip_requirements=DEEPFACE_PIP_REQUIREMENTS,
                 artifacts=artifacts, 
                 signature=signature,
