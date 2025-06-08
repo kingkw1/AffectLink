@@ -81,6 +81,7 @@ def get_facial_emotion_from_frame(frame):
 		# DeepFace returns a list of dicts, one for each detected face
 		if analysis and isinstance(analysis, list) and len(analysis) > 0:
 			first_face = analysis[0]  # Process the first detected face
+			face_region = first_face.get('region') # Get the region of the detected face
 			# Get all raw scores from DeepFace, normalized to 0-1
 			raw_emotion_scores = {k: v / 100.0 for k, v in first_face['emotion'].items()}
 
@@ -99,14 +100,14 @@ def get_facial_emotion_from_frame(frame):
 				final_confidence = valid_unified_scores[final_emotion]
 			
 			# logger.info(f"Facial emotion (filtered): {final_emotion} ({final_confidence:.2f})")
-			return (final_emotion, final_confidence), raw_emotion_scores
+			return (final_emotion, final_confidence), raw_emotion_scores, face_region
 		else:  # No face detected or analysis list is empty
 			logger.debug("No face detected or analysis empty in get_facial_emotion_from_frame.")
-			return ("unknown", 0.0), {}
+			return ("unknown", 0.0), {}, None
 
 	except Exception as e:
 		logger.error(f"Error during facial emotion analysis in get_facial_emotion_from_frame: {e}", exc_info=True)
-		return ("unknown", 0.0), {}
+		return ("unknown", 0.0), {}, None
 
 
 # Updated function signature
@@ -192,7 +193,7 @@ def process_video(shared_state, video_lock, video_started_event):
 
 			# Increase the update frequency - save every 2nd frame instead of every 3rd
 			# This provides more frequent updates to the dashboard
-			if process_video.frame_count % 2 == 0:  # Changed from 3 to 2
+			if process_video.frame_count % 1 == 0:  # Changed from 3 to 2
 				# Add a small random component to filenames to avoid any caching issues
 				random_suffix = random.randint(1000, 9999)
 
@@ -200,11 +201,20 @@ def process_video(shared_state, video_lock, video_started_event):
 				tmp_frame_path = os.path.join(tempfile.gettempdir(), f"affectlink_frame_tmp_{random_suffix}.jpg")
 				frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
 
+				# Analyze face for emotion (and get region) BEFORE drawing and saving
+				# This ensures we have the region data if a face is detected
+				facial_emotion_data, raw_emotion_scores, face_region = get_facial_emotion_from_frame(frame.copy()) # Operate on a copy for analysis
+
+				# Draw bounding box on the original 'frame' if a face is detected
+				if face_region:
+					x, y, w, h = face_region['x'], face_region['y'], face_region['w'], face_region['h']
+					cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)  # Green box, thickness 2
+
 				# Save with higher quality (95) to temp file
 				# Convert to RGB before saving to ensure proper color format
 				if frame is not None:
 					# Make a copy to avoid modifying the original
-					frame_to_save = frame.copy()
+					frame_to_save = frame.copy() # This frame now potentially has the bounding box
 					cv2.imwrite(tmp_frame_path, frame_to_save, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
 
 					# Then move the temp file to the final location (atomic operation)
@@ -214,11 +224,8 @@ def process_video(shared_state, video_lock, video_started_event):
 			# Saving to file is optional, so don't stop on errors
 			logger.debug(f"Error saving frame to file: {e}")
 
-		# Analyze face for emotion
+		# Update shared_state with emotion data (already retrieved above)
 		try:
-			# Call the new function to get emotion data
-			facial_emotion_data, raw_emotion_scores = get_facial_emotion_from_frame(frame)
-
 			if facial_emotion_data and facial_emotion_data[0] != "unknown" and facial_emotion_data[0] != "error":
 				# Update shared_state
 				with video_lock:
