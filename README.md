@@ -34,6 +34,37 @@ python app/main.py
 - [Link to Demo Video Here]
 
 ## 📚 Documentation
+
+### Architecture
+```mermaid
+graph TD
+    A["User / Webcam / Mic 🎤📹"] -->|Input Stream| B["AffectLink Streamlit UI 🖥️"]
+    
+    subgraph "Local Workstation / HP AI Studio 🔒"
+        B -->|Data & Commands| C["main_processor.py (Orchestrator)"]
+        
+        C -->|Audio Frames| D["Audio Emotion Processor 🎵"]
+        C -->|Video Frames| E["Video Emotion Processor 🖼️"]
+        
+        D -->|Audio Emotions & Transcriptions| C
+        E -->|Facial Emotions| C
+        
+        C -->|Log Metrics & Artifacts| F["MLflow (Tracking & Models) 📊"]
+        C -->|Text Inference Request| G["Swagger API (Local Model Deployment) 🚀"]
+        G -->|Text Emotion Results| C
+        
+        C -->|Display Results & Consistency Index| B
+    end
+    
+    style A fill:#d9e8fb,stroke:#333,stroke-width:2px,color:#1a1a1a
+    style B fill:#d0f0c0,stroke:#333,color:#1a1a1a
+    style C fill:#fef3bd,stroke:#333,color:#1a1a1a
+    style D fill:#e6e6fa,stroke:#333,color:#1a1a1a
+    style E fill:#e6e6fa,stroke:#333,color:#1a1a1a
+    style F fill:#cceeff,stroke:#333,color:#1a1a1a
+    style G fill:#ffcccc,stroke:#333,color:#1a1a1a
+```
+
 - [Architecture Diagram](docs/architecture.png)
 - [Demo Scenario Script](docs/demo_script.md)
 
