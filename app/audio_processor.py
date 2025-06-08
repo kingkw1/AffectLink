@@ -532,46 +532,6 @@ def analyze_audio_emotion_full(audio_path, ser_model, ser_processor):
         return "neutral", 0.0, []
 
 
-# Emotion mapping dictionaries
-def _create_and_normalize_unified_scores(raw_scores_input, mapping_dict, target_emotions):
-    """
-    Create a dictionary of scores in the unified emotion space, normalized to 1.0.
-    raw_scores_input can be:
-        - a dict (e.g., from DeepFace: {'neutral': 0.9, ...})
-        - a list of dicts (e.g., from text/SER classifiers: [{'label': 'joy', 'score': 0.9}, ...])
-    mapping_dict maps raw emotion labels to unified labels.
-    target_emotions is a list of the unified emotion labels we care about.
-    """
-    unified_scores = {emotion: 0.0 for emotion in target_emotions}
-
-    processed_scores = {} # Intermediate dict to sum scores for raw labels before mapping
-
-    if isinstance(raw_scores_input, dict):
-        processed_scores = raw_scores_input
-    elif isinstance(raw_scores_input, list):
-        for item in raw_scores_input:
-            label_key = 'label' if 'label' in item else 'emotion' # text uses 'label', SER uses 'emotion'
-            if label_key in item: # Ensure the key exists
-                emotion_name = item[label_key]
-                score = item.get('score', 0.0)
-                processed_scores[emotion_name] = processed_scores.get(emotion_name, 0.0) + score
-
-    # Map to unified emotions
-    for raw_emotion, score in processed_scores.items():
-        unified_emotion_category = mapping_dict.get(raw_emotion)
-        if unified_emotion_category in unified_scores: # Only consider emotions that map to one of the target_emotions
-            unified_scores[unified_emotion_category] += score
-
-    # Normalize the unified_scores
-    total_unified_score = sum(unified_scores.values())
-    if total_unified_score > 0:
-        for emotion in unified_scores:
-            unified_scores[emotion] /= total_unified_score
-    # If total_unified_score is 0, unified_scores will remain all zeros.
-
-    return unified_scores
-
-
 def moving_average(scores):
     """
     Calculate moving average for a list of scores
@@ -580,7 +540,7 @@ def moving_average(scores):
         return 0
     return sum(scores) / len(scores)
 
-# Emotion categories for unified mapping
+
 def audio_processing_loop(shared_state, audio_lock, whisper_model, text_emotion_classifier, ser_model, ser_processor, device, video_started_event, use_whisper_api: bool = True, use_ser_api: bool = True, use_text_classifier_api: bool = True):
     """Process audio for speech-to-text and emotion analysis"""
     global audio_buffer  # Only audio_buffer is global now
