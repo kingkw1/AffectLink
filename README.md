@@ -50,9 +50,7 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
     cd AffectLink
     ```
 
-2a. **Set Up and Install Python Dependencies for :**
-
-2b.  **Set Up and Install Python Dependencies:**
+2.  **Set Up and Install Python Dependencies:**
     It's highly recommended to use a Python virtual environment to manage dependencies. This ensures that AffectLink's libraries don't conflict with other Python projects on your system.
 
     * **A. Create a Virtual Environment (Recommended Python 3.10):**
