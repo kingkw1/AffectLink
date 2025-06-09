@@ -200,7 +200,7 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
           * **3. Setup Workspace**
               * Create a new workspace. Select `Deeplearning GPU` from the images catalog.
               * Choose a workspace name and setup with GPU configuration.
-              * Select `Add Custom Libraries` and select "audio_requirements.txt" from inside of "AffectLink/deployment".
+              * Select `Add Custom Libraries` and select "hp_ai_studio_requirements.txt" from inside of "AffectLink/deployment".
               * Select `Validate` and wait for confirmation that validation is complete.
               * Create Workspace.
 
