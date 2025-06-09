@@ -172,12 +172,13 @@ def clear_stale_files():
         # Delete frame file if it exists
         if os.path.exists(frame_path):
             os.remove(frame_path)
-            logger.info(f"Deleted old frame file: {frame_path}")
-        
+            logger.debug(f"Deleted old frame file: {frame_path}") 
+
         # Delete emotion file if it exists
         if os.path.exists(emotion_path):
             os.remove(emotion_path)
-            logger.info(f"Deleted old emotion file: {emotion_path}")
+            logger.debug(f"Deleted old emotion file: {emotion_path}")
+            
     except Exception as e:
         logger.warning(f"Error clearing stale files: {e}")
 
