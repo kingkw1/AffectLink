@@ -1,33 +1,63 @@
 import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
-import time # Added for timestamps
-from collections import deque
-import tempfile
-import math
+# Standard Library Imports
 import json
+import logging
+import math
 import shutil
-import traceback # Moved from various functions
+import tempfile
+import threading
+import time
+import traceback
+from collections import deque
+
+# Third-Party Imports
+import numpy as np
 import torch
 import whisper
 from transformers import pipeline, AutoModelForAudioClassification, AutoFeatureExtractor
-import logging
-import threading
-import numpy as np
 
-from constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS, TEXT_TO_UNIFIED # Ensure TEXT_TO_UNIFIED is imported if used by convert_to_serializable or related logic
+# Local Application/Library Specific Imports
+from constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS, TEXT_TO_UNIFIED
 from audio_processor import audio_processing_loop, record_audio
 from video_processor import process_video
 
-# Suppress DeepFace logging for cleaner console output
+# Suppress DeepFace logging
 logging.getLogger('deepface').setLevel(logging.ERROR)
 
-# Logger configuration
-# Ensure logger is configured only once if not already configured by root.
-if not logging.getLogger().handlers: # Check root logger
+# Logger Configuration
+# Configure root logger if no handlers are present, to avoid duplicate logging from libraries.
+if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__) # Use __name__ for module-specific logger
+
+# Global Variables
+shared_state = {
+    'emotion_queue': None,
+    'stop_event': None,
+    'latest_audio': None,
+    'latest_frame': None,
+    'transcribed_text': "Waiting for audio transcription...",
+    'facial_emotion': ("neutral", 0.0),
+    'audio_emotion': ("neutral", 0.0),
+    'text_emotion': ("neutral", 0.0),
+    'overall_emotion': "neutral",
+    'facial_emotion_full_scores': {},
+    'audio_emotion_full_scores': [],
+    'facial_emotion_history': deque(maxlen=60),
+    'text_emotion_history': deque(maxlen=60),
+    'ser_emotion_history': deque(maxlen=60)
+}
+
+whisper_model = None
+text_classifier = None
+audio_feature_extractor = None
+audio_classifier = None
+face_cascade = None # Typically loaded in process_video if needed there
+
+last_audio_analysis = time.time() - 10  # Force initial analysis on first run
 
 def convert_to_serializable(obj):
     """
@@ -45,17 +75,12 @@ def convert_to_serializable(obj):
     if isinstance(obj, list):
         return [convert_to_serializable(i) for i in obj]
     if isinstance(obj, tuple):
-        # Convert tuples to lists as JSON doesn't have a tuple type,
-        # and lists are generally more common for sequences in JSON.
         return [convert_to_serializable(i) for i in obj]
     if isinstance(obj, deque):
-        return [convert_to_serializable(i) for i in list(obj)] # Convert deque to list
-    # Pass through types that are already JSON serializable
+        return [convert_to_serializable(i) for i in list(obj)]
     if isinstance(obj, (str, int, float, bool, type(None))):
         return obj
     
-    # For any other unhandled types, log a warning and attempt to convert to string as a fallback.
-    # This might not be ideal for all types but can prevent outright crashes.
     logger.warning(f"Unhandled type for serialization: {type(obj)}. Converting to string.")
     return str(obj)
 
@@ -67,9 +92,9 @@ def get_consistency_level(cosine_sim):
         return "Medium"
     elif cosine_sim >= 0.3:
         return "Low"
-    elif cosine_sim <= 0.01: # Match dashboard's "Unknown" condition
+    elif cosine_sim <= 0.01:
         return "Unknown" 
-    else: # Covers 0.01 < cosine_sim < 0.3
+    else:
         return "Very Low"
 
 
@@ -80,13 +105,11 @@ def create_unified_emotion_vector(emotion_scores, mapping_dict):
     unified_vector = [0.0] * len(UNIFIED_EMOTIONS)
     
     for emotion, score in emotion_scores.items():
-        # Map to unified emotion if possible
         if emotion in mapping_dict and mapping_dict[emotion] is not None:
             unified_emotion = mapping_dict[emotion]
             unified_index = UNIFIED_EMOTIONS.index(unified_emotion)
             unified_vector[unified_index] += score
             
-    # Normalize
     total = sum(unified_vector)
     if total > 0:
         unified_vector = [score/total for score in unified_vector]
@@ -105,7 +128,6 @@ def create_unified_emotion_dict(emotion_scores, mapping_dict):
             if unified_emotion in unified_scores:
                 unified_scores[unified_emotion] += score
                 
-    # Normalize
     total = sum(unified_scores.values())
     if total > 0:
         for emotion in unified_scores:
@@ -113,55 +135,7 @@ def create_unified_emotion_dict(emotion_scores, mapping_dict):
             
     return unified_scores
 
-# Suppress DeepFace logging for cleaner console output
-logging.getLogger('deepface').setLevel(logging.ERROR) # Changed to target 'deepface' specifically
-
-# Add logging for debug information
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('detect_emotion')
-
-# Global variables
-shared_state = {
-    'emotion_queue': None,
-    'stop_event': None,
-    'latest_audio': None,
-    'latest_frame': None,
-    'transcribed_text': "Waiting for audio transcription...",
-    'facial_emotion': ("neutral", 0.0),
-    'audio_emotion': ("neutral", 0.0),
-    'text_emotion': ("neutral", 0.0),
-    'overall_emotion': "neutral",
-    'facial_emotion_full_scores': {},
-    'audio_emotion_full_scores': [],
-    'facial_emotion_history': deque(maxlen=60), # Added for historical tracking
-    'text_emotion_history': deque(maxlen=60),   # Added for historical tracking
-    'ser_emotion_history': deque(maxlen=60)     # Added for historical tracking
-}
-
-# Reusable whisper model instance
-whisper_model = None
-
-# Text emotion classification pipeline
-text_classifier = None
-
-# Audio emotion classification model
-audio_feature_extractor = None
-audio_classifier = None
-
-last_audio_analysis = time.time() - 10  # Force initial analysis
-
-# Face detection and emotion recognition
-face_cascade = None
-
-# Logger configuration
-logger = logging.getLogger(__name__)
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO,
-                      format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-# Clear any existing frame and emotion files at startup to prevent the dashboard
-# from loading stale data from previous sessions
+# Clear any existing frame and emotion files at startup
 def clear_stale_files():
     """Delete any existing frame and emotion files to ensure a fresh start"""
     try:
@@ -169,12 +143,10 @@ def clear_stale_files():
         frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
         emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
         
-        # Delete frame file if it exists
         if os.path.exists(frame_path):
             os.remove(frame_path)
             logger.debug(f"Deleted old frame file: {frame_path}") 
 
-        # Delete emotion file if it exists
         if os.path.exists(emotion_path):
             os.remove(emotion_path)
             logger.debug(f"Deleted old emotion file: {emotion_path}")
@@ -215,13 +187,10 @@ def calculate_average_multimodal_similarity(facial_vector, audio_vector, text_ve
         float: Overall cosine similarity score across modalities.
         """
     
-    # Calculate pairwise cosine similarities
     similarity_fa = calculate_cosine_similarity(facial_vector, audio_vector)
     similarity_ft = calculate_cosine_similarity(facial_vector, text_vector)
     similarity_at = calculate_cosine_similarity(audio_vector, text_vector)
     
-    # Average similarity (or other combination logic)
-    # Consider only valid similarities (e.g. if a modality is not present, its vector might be all zeros)
     valid_similarities = []
     if facial_vector != [0.0] * len(UNIFIED_EMOTIONS) and audio_vector != [0.0] * len(UNIFIED_EMOTIONS):
         valid_similarities.append(similarity_fa)
@@ -233,7 +202,7 @@ def calculate_average_multimodal_similarity(facial_vector, audio_vector, text_ve
     if valid_similarities:
         overall_cosine_similarity = sum(valid_similarities) / len(valid_similarities)
     else:
-        overall_cosine_similarity = 0.0 # Default if no valid pairs
+        overall_cosine_similarity = 0.0
     
     logger.debug(f"Cosine similarities: facial-audio={similarity_fa:.3f}, facial-text={similarity_ft:.3f}, audio-text={similarity_at:.3f}")
     logger.debug(f"Valid similarities count: {len(valid_similarities)}; Overall cosine similarity: {overall_cosine_similarity:.3f}")
@@ -241,66 +210,57 @@ def calculate_average_multimodal_similarity(facial_vector, audio_vector, text_ve
     return overall_cosine_similarity
 
 def load_models():
+    global whisper_model, text_classifier, audio_feature_extractor, audio_classifier
     
-    # Define project root and model cache directories
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir) # This assumes 'app' is one level down from project root
+    project_root = os.path.dirname(script_dir)
     
     whisper_cache_dir = os.path.join(project_root, "models", "whisper_cache")
     transformers_cache_dir = os.path.join(project_root, "models", "transformers_cache")
 
-    # Create cache directories if they don't exist
     os.makedirs(whisper_cache_dir, exist_ok=True)
     os.makedirs(transformers_cache_dir, exist_ok=True)
     logger.info(f"Whisper models will be cached in: {whisper_cache_dir}")
     logger.info(f"Transformers models will be cached in: {transformers_cache_dir}")
     
-    # Initialize the Whisper model for transcription
-    print("Initializing Whisper model...")
+    logger.info("Initializing Whisper model...")
     try:
-        # Use base model instead of tiny for better accuracy
         whisper_model = whisper.load_model("base", download_root=whisper_cache_dir)
-        # Verify whisper model loaded correctly
         if whisper_model is None:
             logger.error("Failed to initialize Whisper model")
-            return
+            return None, None, None, None, None # Ensure consistent return on failure
         logger.info(f"Whisper model successfully loaded: {type(whisper_model).__name__} (base)")
         
-        # Move model to CUDA if available
         if hasattr(whisper_model, 'to') and torch.cuda.is_available():
             whisper_model = whisper_model.to("cuda")
             logger.info("Whisper model moved to CUDA")
     except Exception as e:
         logger.error(f"Error loading Whisper model: {e}")
-        return  # Exit if we can't load the model
+        return None, None, None, None, None
     
-    # Initialize text emotion classifier
-    print("Initializing text emotion classifier...")
+    logger.info("Initializing text emotion classifier...")
     try:
         text_classifier = pipeline("text-classification", 
                                 model="j-hartmann/emotion-english-distilroberta-base", 
                                 top_k=None,
-                                # cache_dir=transformers_cache_dir
+                                cache_dir=transformers_cache_dir
                                 )
     except Exception as e:
         logger.error(f"Error loading text classifier: {e}")
-        return  # Exit if we can't load the classifier
+        return None, None, None, None, None
     
-    # Initialize audio emotion classifier - using a more accessible model
-    print("Initializing audio emotion classifier...")
+    logger.info("Initializing audio emotion classifier...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device set to use {device}")
+    logger.info(f"Device set to use {device}")
         
-    ser_model_name = "superb/hubert-large-superb-er" # Correct SER model
+    ser_model_name = "superb/hubert-large-superb-er"
     try:      
         audio_feature_extractor = AutoFeatureExtractor.from_pretrained(ser_model_name, cache_dir=transformers_cache_dir)
         audio_classifier = AutoModelForAudioClassification.from_pretrained(ser_model_name, cache_dir=transformers_cache_dir)
         
-        # Make sure both are on the same device
         audio_classifier = audio_classifier.to(device)
         logger.info(f"Audio classifier ({ser_model_name}) successfully loaded and moved to {device}")
 
-        # Log the labels from the loaded SER model config
         if hasattr(audio_classifier, 'config') and hasattr(audio_classifier.config, 'id2label'):
             model_labels_dict = audio_classifier.config.id2label
             ser_actual_labels_from_config = [model_labels_dict[i] for i in sorted(model_labels_dict.keys())]
@@ -310,12 +270,13 @@ def load_models():
 
     except Exception as e:
         logger.error(f"Error loading audio classifier: {e}")
+        return None, None, None, None, None # Return None for all on failure
     
     return whisper_model, text_classifier, audio_feature_extractor, audio_classifier, device
 
 def main(
         emotion_queue=None, 
-        stop_event=None, 
+        stop_event_param=None,
         camera_index=0, 
         use_whisper_api_toggle = True,
         use_ser_api_toggle = True,
@@ -324,58 +285,54 @@ def main(
 
     """Main function for emotion detection."""
     global shared_state, whisper_model, text_classifier, audio_feature_extractor, audio_classifier, face_cascade
-    # Ensure ser_model and ser_processor are correctly scoped or passed if needed by audio_processing_loop
-    # Depending on their initialization, they might need to be global or passed differently.
     
     logger.info(f"Detect_emotion main started with camera_index: {camera_index}")
         
-    # Store the queue and stop event
     shared_state['emotion_queue'] = emotion_queue
-    shared_state['stop_event'] = stop_event
+    shared_state['stop_event'] = stop_event_param # Use renamed parameter
     
-    # Convert int/str camera_index to int
     if isinstance(camera_index, str):
-        camera_index = int(camera_index)
+        try:
+            camera_index = int(camera_index)
+        except ValueError:
+            logger.error(f"Invalid camera_index: {camera_index}. Defaulting to 0.")
+            camera_index = 0
     
-    # Create a dictionary to hold the stop flag if not provided
-    stop_flag = {'stop': False}
-    if stop_event is None:
-        shared_state['stop_event'] = stop_flag
+    if shared_state['stop_event'] is None: # Check shared_state for stop_event
+        shared_state['stop_event'] = threading.Event() # Use threading.Event if None
     
-    # Log if we have access to a frame queue
-    if isinstance(stop_event, dict) and 'shared_frame_data' in stop_event:
-        print(f"Detector received shared frame queue: {stop_event['shared_frame_data']}")
+    if isinstance(shared_state['stop_event'], dict) and 'shared_frame_data' in shared_state['stop_event']:
+        logger.info(f"Detector received shared frame queue: {shared_state['stop_event']['shared_frame_data']}")
     
-    # Load models
+    # Load models if not using all API toggles
+    device = None # Initialize device
     if not (use_whisper_api_toggle and use_ser_api_toggle and use_text_classifier_api_toggle):
-        whisper_model, text_classifier, audio_feature_extractor, audio_classifier, device = load_models()
+        # Models are loaded into global scope by load_models()
+        _, _, _, _, device = load_models() # Assign return values, device is the last one
+        if device is None: # Check if model loading failed
+            logger.error("Model loading failed. Exiting main_processor.")
+            return # Exit if models didn't load
     else:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info("All API toggles are True. Models will be managed by API calls.")
 
-
-    # Event for synchronization between video and audio threads
     video_started_event = threading.Event()
     
-    # Start audio recording thread first (collects audio data)
-    print("Starting audio recording thread...")
+    logger.info("Starting audio recording thread...")
     audio_thread = threading.Thread(target=record_audio, args=(shared_state,))
     audio_thread.daemon = True
     audio_thread.start()
     
-    # Wait a moment for the audio thread to initialize
     time.sleep(1)
     
-    # Create audio analysis data structures
-    # audio_emotion_log = [] # Removed, now part of shared_state
     audio_lock = threading.Lock()
 
-    # Start audio processing thread with error handling
-    print("Starting audio processing thread...")
+    logger.info("Starting audio processing thread...")
     try:
         audio_processing_thread = threading.Thread(
             target=audio_processing_loop,
             args=(shared_state, audio_lock, 
-                  whisper_model, text_classifier, # text_emotion_classifier is still passed for local use
+                  whisper_model, text_classifier,
                   audio_classifier, audio_feature_extractor, 
                   device, video_started_event,
                   use_whisper_api_toggle,
@@ -385,25 +342,21 @@ def main(
         )
         audio_processing_thread.daemon = True
         audio_processing_thread.start()
-        print("Audio processing thread started successfully")
+        logger.info("Audio processing thread started successfully")
     except Exception as e:
         logger.error(f"Failed to start audio processing thread: {e}")
         logger.error(traceback.format_exc())
-    
-    # --- END AUDIO PROCESSING COMPONENTS ---
+        return # Exit if audio processing thread fails to start
 
-    # Start video processing thread
-    print("Starting video processing thread...")
-    video_lock = threading.Lock() # Create a lock for video processing
+    logger.info("Starting video processing thread...")
+    video_lock = threading.Lock()
     video_thread = threading.Thread(target=process_video, args=(shared_state, video_lock, video_started_event))
     video_thread.daemon = True
     video_thread.start()
     
-    # Set the event to signal video has started
-    video_started_event.set()
+    video_started_event.set() # Signal video has started
     
-    # Main loop for emotion analysis
-    print("Starting main emotion analysis loop...")
+    logger.info("Starting main emotion analysis loop...")
     try:
         while True:
             # Check if we need to stop
@@ -419,7 +372,6 @@ def main(
                 break
             
             # Prepare data for JSON
-            # Ensure all relevant shared_state items are included
             result_data = {
                 "timestamp": time.time(),
                 "facial_emotion": shared_state.get('facial_emotion', ("neutral", 0.0)),
@@ -441,7 +393,6 @@ def main(
             }
             
             # Calculate overall emotion and cosine similarity
-            # Ensure all emotion data is available and in the correct format
             facial_emotion_data = shared_state.get('facial_emotion_full_scores', {})
             audio_emotion_data = shared_state.get('audio_emotion_full_scores', []) # This is a list of dicts
             text_emotion_data = shared_state.get('text_emotion_unified_scores', {}) # This is a dict
@@ -455,14 +406,11 @@ def main(
             
             # For text, retrieve the full emotion scores list from shared_state
             text_emotion_data_for_vector = shared_state.get('text_emotion_full_scores', [])
-            # Convert the list of dicts {'emotion': label, 'score': value} to a dict for create_unified_emotion_vector
-            # Handle both 'emotion' and 'label' keys from the full_scores list
             text_scores_dict = {
                 (item.get('emotion') or item.get('label')): item.get('score', 0.0) 
                 for item in text_emotion_data_for_vector 
                 if isinstance(item, dict) and ((item.get('emotion') or item.get('label')) is not None) and item.get('score') is not None
             }
-            # Use create_unified_emotion_vector with the text-specific mapping
             text_vector = create_unified_emotion_vector(text_scores_dict, TEXT_TO_UNIFIED)
 
             # Get overall cosine similarity
@@ -472,7 +420,6 @@ def main(
             result_data["consistency_level"] = get_consistency_level(overall_cosine_similarity)
             
             # Determine overall dominant emotion (simple majority or weighted average of vectors)
-            # For now, let's average the vectors and find the max component
             if facial_vector and audio_vector and text_vector: # Ensure all vectors are non-empty
                 avg_vector = [
                     (f + a + t) / 3 
@@ -494,24 +441,17 @@ def main(
 
             # Save to JSON file
             emotion_file_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
-            # Use a unique temporary file name to prevent race conditions or partial writes
             temp_emotion_file_path = os.path.join(tempfile.gettempdir(), f"affectlink_emotion_tmp_{os.getpid()}_{time.time_ns()}.json")
 
             try:
                 with open(temp_emotion_file_path, 'w') as f:
                     json.dump(serializable_result_data, f, indent=4)
                 
-                # Atomically move/rename the temporary file to the final destination
                 shutil.move(temp_emotion_file_path, emotion_file_path)
-                # logger.debug(f"Emotion data saved to {emotion_file_path}") # Debug level might be more appropriate
             except TypeError as e:
                 logger.error(f"Error saving emotion data to file (TypeError): {e}")
-                # To aid debugging, log the problematic data structure if the error persists.
-                # Be cautious as this could be very verbose.
-                # logger.error(f"Data causing error (first level): {{k: type(v) for k,v in serializable_result_data.items()}}")
             except Exception as e:
                 logger.error(f"Unexpected error saving emotion data: {e}")
-                # If temp_emotion_file_path was created, try to clean it up
                 if os.path.exists(temp_emotion_file_path):
                     try:
                         os.remove(temp_emotion_file_path)
@@ -521,9 +461,7 @@ def main(
             # Send data to queue if it exists
             if shared_state.get('emotion_queue') is not None:
                 try:
-                    # Send the serializable data to the queue as well
                     shared_state['emotion_queue'].put(serializable_result_data)
-                    # logger.debug("Sent emotion data to queue.") # Debug level
                 except Exception as q_err:
                     logger.warning(f"Could not put emotion data to queue: {q_err}")
 

@@ -171,7 +171,7 @@ def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
         # Run the main function with the queue, our stop dict, and camera index
         main_processor.main(
             emotion_queue=emotion_queue,
-            stop_event=shared_stop_dict,  # Pass the dict instead of the Event
+            stop_event_param=shared_stop_dict,  # Pass the dict instead of the Event
             camera_index=camera_index
         )
     except Exception as e:
