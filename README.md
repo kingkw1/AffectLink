@@ -50,7 +50,9 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
     cd AffectLink
     ```
 
-2.  **Set Up and Install Python Dependencies:**
+2a. **Set Up and Install Python Dependencies for :**
+
+2b.  **Set Up and Install Python Dependencies:**
     It's highly recommended to use a Python virtual environment to manage dependencies. This ensures that AffectLink's libraries don't conflict with other Python projects on your system.
 
     * **A. Create a Virtual Environment (Recommended Python 3.10):**
@@ -119,6 +121,53 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
             pip install torch==2.7.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cpu
             ```
         *Note: The `torch` and `torchaudio` versions (`2.7.0` in these commands) should match the base version from your original `requirements.txt`.*
+
+    * **E. Verify GPU/CUDA Setup (Highly Recommended):**
+        After installing all packages, it's crucial to confirm that PyTorch and TensorFlow (used by DeepFace) are correctly configured to use your NVIDIA GPU with CUDA. Open your Python interpreter within the activated virtual environment and run the following checks:
+
+        * **For PyTorch:**
+            ```python
+            import torch
+            print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
+            if torch.cuda.is_available():
+                print(f"PyTorch CUDA device count: {torch.cuda.device_count()}")
+                print(f"PyTorch current CUDA device: {torch.cuda.current_device()}")
+                print(f"PyTorch device name: {torch.cuda.get_device_name(0)}")
+            ```
+            *Expected output for success:* `PyTorch CUDA available: True` and details about your GPU.
+
+        * **For TensorFlow (used by DeepFace):**
+            ```python
+            import tensorflow as tf
+            print(f"TensorFlow GPU available: {tf.config.list_physical_devices('GPU')}")
+            ```
+            *Expected output for success:* A list containing your GPU device (e.g., `[PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')]`).
+
+        * **Troubleshooting:**
+            * **PyTorch CUDA Issues:** If PyTorch CUDA is not available:
+                * Ensure you used the correct `cu12x` version in the `pip install torch` command (Step 2D Option 1).
+                * Verify that the NVIDIA CUDA Toolkit and CuDNN are correctly installed and configured on your system, and that their versions are compatible with the PyTorch version you're trying to use.
+                * Check NVIDIA driver paths and ensure they are correctly added to your system's PATH.
+                * Consult PyTorch's official installation guides for more detailed troubleshooting.
+            * **TensorFlow GPU Issues (TensorFlow GPU available: []):**
+                This is a common challenge, even with CUDA installed. If TensorFlow is not detecting your GPU, it means the installed TensorFlow package is likely not configured for GPU, or there's a version mismatch with your CUDA/CuDNN.
+
+                **Recommendation for Hackathon (Prioritize Functionality):**
+                For the hackathon, if you cannot quickly resolve the GPU detection for TensorFlow, it is often best to ensure the project runs by forcing TensorFlow to use the CPU.
+                1.  **Uninstall** your current `tensorflow` and `tf-keras` packages:
+                    ```bash
+                    pip uninstall tensorflow tf-keras -y
+                    ```
+                2.  **Install** the CPU-only versions:
+                    ```bash
+                    pip install tensorflow-cpu==2.19.0 tf-keras==2.19.0
+                    ```
+                    *(Note: Ensure the versions here match the base versions from your original `requirements.txt` to maintain overall compatibility with other packages.)*
+                3.  **Re-run** the `tf.config.list_physical_devices('GPU')` check. It should still show `[]`, but now you're certain it's using the CPU version, which will work.
+
+                **Advanced GPU Troubleshooting (If time allows):** If you wish to troubleshoot TensorFlow's GPU further, ensure your `tensorflow` and `tf_keras` packages are designed for GPU (e.g., by checking their PyPI pages for specific GPU wheels). Sometimes, specific environment variables or different wheel files are needed. Since PyTorch is working, your CUDA installation is likely fine; the issue is specific to TensorFlow's integration. Refer to the official TensorFlow GPU installation guide for your specific version.
+
+            * **General Installation Issues:** If other issues persist, ensure you have stable internet connection for downloads.
 
 3.  **System-Level Dependencies (Linux):**
     In addition to the Python packages, AffectLink requires certain system-level libraries. If you are running a Debian/Ubuntu-based Linux system, you can install these with:
