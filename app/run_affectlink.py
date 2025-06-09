@@ -50,17 +50,14 @@ def find_available_camera(preferred_index=0, use_directshow=True):
     Returns:
         tuple: (camera_index, backend_type, cv2.VideoCapture object) or (None, None, None) if no camera is found
     """
-    print(f"Searching for available cameras (preferred index: {preferred_index})")
 
     # First try the preferred camera index with DirectShow if enabled
     if use_directshow:
         try:
-            print(f"Trying camera {preferred_index} with DirectShow...")
             cap = cv2.VideoCapture(preferred_index, cv2.CAP_DSHOW)
             if cap.isOpened():
                 ret, frame = cap.read()
                 if ret:
-                    print(f"Successfully opened camera {preferred_index} with DirectShow")
                     return preferred_index, "directshow", cap
                 cap.release()
         except Exception as e:
@@ -87,12 +84,10 @@ def find_available_camera(preferred_index=0, use_directshow=True):
         # Try with DirectShow
         if use_directshow:
             try:
-                print(f"Trying camera {idx} with DirectShow...")
                 cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
                 if cap.isOpened():
                     ret, frame = cap.read()
                     if ret:
-                        print(f"Successfully opened camera {idx} with DirectShow")
                         return idx, "directshow", cap
                     cap.release()
             except Exception as e:
@@ -117,13 +112,11 @@ def find_available_camera(preferred_index=0, use_directshow=True):
 
 def check_webcam():
     """Check if webcam is available"""
-    print("Checking webcam availability...")
     try:
         # find_available_camera is imported from camera_utils at the top of the file
         camera_idx, backend, cap = find_available_camera()
         
         if cap is not None:
-            print(f"✅ Webcam found: Camera #{camera_idx} with {backend} backend.")
             cap.release()
             return True, camera_idx, backend
         else:
@@ -135,13 +128,11 @@ def check_webcam():
 
 def check_microphone():
     """Check if microphone is available"""
-    print("Checking microphone availability...")
     try:
         devices = sd.query_devices()
         default_input = sd.query_devices(kind='input')
         
         if default_input:
-            print(f"✅ Microphone found: {default_input.get('name', 'Unknown')}")
             return True, default_input.get('name')
         else:
             print("❌ No microphone detected.")
