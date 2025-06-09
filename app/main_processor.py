@@ -11,6 +11,7 @@ import threading
 import time
 import traceback
 from collections import deque
+import sounddevice as sd
 
 # Third-Party Imports
 import numpy as np
@@ -19,8 +20,8 @@ import whisper
 from transformers import pipeline, AutoModelForAudioClassification, AutoFeatureExtractor
 
 # Local Application/Library Specific Imports
-from constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS, TEXT_TO_UNIFIED
-from audio_processor import audio_processing_loop, record_audio
+from constants import FACIAL_TO_UNIFIED, SER_TO_UNIFIED, UNIFIED_EMOTIONS, TEXT_TO_UNIFIED, AUDIO_SAMPLE_RATE
+from audio_processor import audio_processing_loop, audio_buffer, logger
 from video_processor import process_video
 
 # Suppress DeepFace logging
@@ -269,6 +270,124 @@ def load_models():
         return None, None, None, None, None # Return None for all on failure
     
     return whisper_model, text_classifier, audio_feature_extractor, audio_classifier, device
+
+
+def record_audio(shared_state):
+    """Record audio continuously and store in shared state"""
+    global audio_buffer
+
+    # Track audio stats
+    audio_level_tracker = deque(maxlen=20)  # Track last 20 audio chunks
+    last_stats_time = time.time()
+
+    def audio_callback(indata, frames, time_, status):
+        """Callback for sounddevice to continuously capture audio"""
+        nonlocal audio_level_tracker, last_stats_time
+
+        if status:
+            logger.info(f"Audio recording status: {status}")
+
+        # Add the new audio data to our buffer
+        audio_data = indata[:, 0]  # Use first channel
+
+        # Track audio levels for diagnostics
+        audio_rms = np.sqrt(np.mean(audio_data**2))
+        audio_level_tracker.append(audio_rms)
+
+        # Periodic diagnostics about audio levels
+        current_time = time.time()
+        if current_time - last_stats_time > 5:  # Every 5 seconds
+            avg_level = sum(audio_level_tracker) / len(audio_level_tracker) if audio_level_tracker else 0
+            peak_level = max(audio_level_tracker) if audio_level_tracker else 0
+            # logger.info(f"Audio levels: current={audio_rms:.6f}, avg={avg_level:.6f}, peak={peak_level:.6f}, buffer_size={len(audio_buffer)}")
+
+            # Detailed buffer diagnostics
+            if audio_buffer:
+                buffer_array = np.array(list(audio_buffer)) # Convert deque to list then numpy array for stats
+                if buffer_array.size > 0: # Ensure buffer_array is not empty
+                    buffer_min = np.min(buffer_array)
+                    buffer_max = np.max(buffer_array)
+                    buffer_std = np.std(buffer_array)
+                    # logger.info(f"Buffer stats: min={buffer_min:.6f}, max={buffer_max:.6f}, std={buffer_std:.6f}")
+                else:
+                    logger.info("Buffer stats: audio_buffer is currently empty for stats calculation.")
+
+            if avg_level < 0.001: # This threshold is for warning, not for stopping transcription
+                logger.warning("Audio levels are very low. Is your microphone working and unmuted?")
+            last_stats_time = current_time
+
+        # Add new audio data to buffer
+        for sample in audio_data:
+            audio_buffer.append(sample)
+
+        # Store the latest audio for processing
+        try:
+            # Ensure audio_buffer is not empty before converting to numpy array
+            if audio_buffer:
+                audio_array = np.array(list(audio_buffer)) # Convert deque to list then numpy array
+                shared_state['latest_audio'] = audio_array
+            else:
+                # If buffer is empty, ensure latest_audio reflects that
+                shared_state['latest_audio'] = np.array([])
+
+        except Exception as e:
+            logger.error(f"Error updating latest audio: {e}")
+
+        # Track silence periods
+        if not hasattr(audio_callback, 'silence_tracker'):
+            audio_callback.silence_tracker = 0
+
+        # Check if this is essentially silence - be more aggressive with buffer clearing
+        if audio_rms < 0.001:
+            audio_callback.silence_tracker += 1
+            # Reset buffer after 15 seconds of silence to avoid "I'm glad I found you" syndrome
+            # Much more aggressive than before (15 seconds instead of 30)
+            if audio_callback.silence_tracker > 150:  # ~15 seconds if called every 100ms
+                logger.warning("Detected extended silence - resetting audio buffer")
+                audio_buffer.clear()
+                shared_state['latest_audio'] = np.array([])  # Clear latest audio as well
+                audio_callback.silence_tracker = 0
+        else:
+            audio_callback.silence_tracker = 0  # Reset on non-silent audio
+
+        # Add a timestamp to track when we last got audio data
+        if not hasattr(audio_callback, 'last_audio_time'):
+            audio_callback.last_audio_time = time.time()
+        else:
+            audio_callback.last_audio_time = time.time()
+
+    try:
+        # Set up the audio stream
+        stream = sd.InputStream(
+            callback=audio_callback,
+            channels=1,
+            samplerate=AUDIO_SAMPLE_RATE,
+            blocksize=int(AUDIO_SAMPLE_RATE * 0.1)  # 100ms blocks
+        )
+
+        # Start recording
+        with stream:
+            logger.info(f"Audio recording started with sample rate {AUDIO_SAMPLE_RATE}Hz")
+
+            # Keep recording until stop flag is set
+            while True:
+                stop_event_obj = shared_state.get('stop_event')
+                if isinstance(stop_event_obj, dict):
+                    if stop_event_obj.get('stop', False):
+                        logger.info("Stop signal received in audio recording")
+                        break
+                elif stop_event_obj and stop_event_obj:
+                    logger.info("Stop event detected in audio recording")
+                    break
+
+                # Sleep briefly to avoid burning CPU
+                time.sleep(0.1)
+
+    except Exception as e:
+        logger.error(f"Error in audio recording: {e}")
+        logger.error(traceback.format_exc())
+    finally:
+        logger.info("Audio recording stopped")
 
 def main(
         emotion_queue=None, 
