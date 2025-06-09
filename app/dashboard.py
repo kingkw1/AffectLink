@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""
-run_app.py - Main script for AffectLink with improved frame sharing
-between the emotion detection and dashboard processes.
-This script sets up the environment and starts the dashboard and emotion detection processes.
-It handles device detection and initialization.
-Usage:
-    python run_app.py
-"""
-
 # Suppress missing ScriptRunContext and set Streamlit log level before import
 import os
 os.environ['STREAMLIT_LOG_LEVEL'] = 'error'

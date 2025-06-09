@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-"""
-run_app.py - Main script for AffectLink with improved frame sharing
-between the emotion detection and dashboard processes.
-This script sets up the environment and starts the dashboard and emotion detection processes.
-It handles device detection and initialization.
-Usage:
-    python run_app.py
-"""
 import time # Added for timestamps
 from collections import deque
 import os
@@ -554,7 +545,7 @@ def main(
         logger.info("Main_processor finished.")
 
 if __name__ == '__main__':
-    # This part is typically called by start_realtime.py or run_app.py as a subprocess
+    # This part is typically called by start_realtime.py or run_affectlink.py as a subprocess
     # or if the script is run directly for testing.
     
     # Example of direct invocation (for testing purposes)
@@ -564,7 +555,7 @@ if __name__ == '__main__':
     # For direct testing, you might not have a queue from another process.
     # main(stop_event=stop_event_main, camera_index=0)
     
-    # The actual entry point when run via multiprocessing in run_app.py doesn't need this __main__ block
+    # The actual entry point when run via multiprocessing in run_affectlink.py doesn't need this __main__ block
     # to call main() again, as the target function for the process is main().
     # However, if this script is intended to be runnable standalone for some reason:
     logger.info("main_processor.py executed directly (likely for testing or unintended use).")

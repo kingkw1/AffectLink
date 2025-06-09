@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_app.py - Main script for AffectLink with improved frame sharing
+run_affectlink.py - Main script for AffectLink with improved frame sharing
 between the emotion detection and dashboard processes.
 """
 

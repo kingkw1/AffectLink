@@ -186,7 +186,7 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
               * **General Installation Issues:** If other issues persist, ensure you have stable internet connection for downloads.
 
 3.  **Download Pre-trained Models (First Run):**
-    AI Studio will need internet access to download some dependencies. Also, the first time `main_processor.py` (which is run by `run_app.py`) is executed, it will attempt to download the pre-trained DeepFace, Whisper, and Hugging Face models. Ensure you have an internet connection for this step. These models will be cached locally.
+    AI Studio will need internet access to download some dependencies, and to download the pre-trained DeepFace, Whisper, and Hugging Face models. Ensure you have an internet connection for this step. These models will be cached locally.
 
 4.  **Set Up and Install Dependencies for HP AI Studio:**
 
@@ -254,7 +254,7 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
 6.  **Configure AffectLink with Deployed Model Endpoints (CRITICAL):**
     Since your Streamlit application (`dashboard.py`) runs as a separate process and connects to these dynamically deployed models, you need to provide their dynamically assigned API endpoint URLs via environment variables.
 
-      * **Set Environment Variables:** Before running `run_app.py`, set the following environment variables with the actual URLs you obtained from HP AI Studio's Swagger UI for each respective model.
+      * **Set Environment Variables:** Before running `run_affectlink.py`, set the following environment variables with the actual URLs you obtained from HP AI Studio's Swagger UI for each respective model.
           * **For Windows (PowerShell):**
             ```powershell
             $env:AFFECTLINK_WHISPER_API_URL="https://localhost:XXXXX/invocations"
@@ -275,7 +275,7 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
     Now that your models are deployed via HP AI Studio and your application is configured with their endpoints, you can launch AffectLink from within your machine's local terminal (not AI Studio).
 
     ```bash
-    python .\app\run_app.py
+    python .\app\run_affectlink.py
     ```
 
     This script will:

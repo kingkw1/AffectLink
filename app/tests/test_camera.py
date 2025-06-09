@@ -13,7 +13,7 @@ project_dir = os.path.join(parent_dir, '..')
 if project_dir not in sys.path:
     sys.path.append(project_dir)
     
-from app.run_app import find_available_camera
+from app.run_affectlink import find_available_camera
 
 def test_webcam():
     print("Testing webcam availability with camera_utils.find_available_camera...")
