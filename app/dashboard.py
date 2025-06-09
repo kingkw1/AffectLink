@@ -1,76 +1,82 @@
 import os
-os.environ['STREAMLIT_LOG_LEVEL'] = 'error'
-import warnings
-warnings.filterwarnings("ignore", ".*missing ScriptRunContext.*")
-import logging
-logging.getLogger('streamlit.runtime.scriptrunner_utils.script_run_context').setLevel(logging.ERROR)
+os.environ['STREAMLIT_LOG_LEVEL'] = 'error' # Configure environment variables first
 
-# Then import Streamlit
+import warnings
+warnings.filterwarnings("ignore", ".*missing ScriptRunContext.*") # Configure warnings next
+
+import logging
+logging.getLogger('streamlit.runtime.scriptrunner_utils.script_run_context').setLevel(logging.ERROR) # Configure logging
+
+# Standard Library Imports
+import datetime
+import json
+import queue
+import sys
+import tempfile
+import threading
+import time
+import traceback
+from multiprocessing.queues import Empty as MPQueueEmpty
+
+# Third-Party Imports
+import cv2
+import numpy as np
 import streamlit as st
+
+# Streamlit Page Configuration
 st.set_page_config(
     page_title="AffectLink Emotion Dashboard",
     page_icon="😊",
     layout="wide"
 )
 
-import cv2
-import numpy as np
-import time
-import threading
-import queue
-import sys
-from multiprocessing.queues import Empty as MPQueueEmpty
-import queue  # Local placeholder
-
-# Initialize session state variables at the very beginning
+# Session State Initialization
 if 'enable_video' not in st.session_state:
     st.session_state.enable_video = True
 if 'enable_audio' not in st.session_state:
     st.session_state.enable_audio = True
 if 'last_frame' not in st.session_state:
     st.session_state.last_frame = None
-# Add a timestamp for the session start to detect fresh frames
 if 'session_start_time' not in st.session_state:
     st.session_state.session_start_time = time.time()
-# Flag to track if we've seen a new frame this session
 if 'new_frame_received' not in st.session_state:
     st.session_state.new_frame_received = False
-# Add a flag to track if we've shown the loading animation
 if 'loading_shown' not in st.session_state:
-    st.session_state.loading_shown = True  # Start by showing loading animation
+    st.session_state.loading_shown = True
 
-# Add the current directory to sys.path to import local modules
+# Global Variables
+# Add the current directory to sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
 
-# Import shared data structures from detect_emotion.py
-# We'll use a queue-based approach for communication between processes
+# Import shared data structures from detect_emotion.py (Organizational comment)
 
 # Dev mode flag for standalone testing
 DEV_MODE = True if __name__ == "__main__" else False
 
-# Global queues, will be set in main()
+# Queues for inter-process/thread communication
 video_frame_queue = None
 emotion_data_queue = None
+ui_update_queue = queue.Queue() # Thread-safe queue for UI updates
 
-# Store latest emotion data
+# Storage for latest emotion data
 latest_data = {
     "facial_emotion": {"emotion": "unknown", "confidence": 0.0},
     "text_emotion": {"emotion": "unknown", "confidence": 0.0},
     "audio_emotion": {"emotion": "unknown", "confidence": 0.0},
-    "transcribed_text": "Waiting for transcription...", # Default text
+    "transcribed_text": "Waiting for transcription...",
     "facial_emotion_full_scores": {},
     "audio_emotion_full_scores": [],
-    "text_emotion_smoothed": {"emotion": "unknown", "confidence": 0.0}, # Add smoothed placeholders
-    "audio_emotion_smoothed": {"emotion": "unknown", "confidence": 0.0},# Add smoothed placeholders
-    "overall_emotion": "unknown", # Add overall emotion placeholder
+    "text_emotion_smoothed": {"emotion": "unknown", "confidence": 0.0},
+    "audio_emotion_smoothed": {"emotion": "unknown", "confidence": 0.0},
+    "overall_emotion": "unknown",
     "cosine_similarity": 0.0,
     "consistency_level": "Unknown",
     "update_id": "initial_0"
 }
 
-# Define emotion colors for visualization
+# Emotion colors for visualization
 EMOTION_COLORS = {
     'neutral': '#AAAAAA',
     'happy': '#66BB6A',
@@ -79,13 +85,21 @@ EMOTION_COLORS = {
     'unknown': '#E0E0E0'
 }
 
-# Flag to control when the dashboard should stop
+# Control flags and thread objects
 should_stop = False
-
-# Define global variables to track thread state
 video_thread = None
 audio_thread = None
-stop_event = threading.Event() if not 'stop_event' in globals() else globals()['stop_event']
+stop_event = threading.Event()
+
+# Global UI Placeholders (will be assigned st.empty() in UI layout)
+video_container = None
+text_container = None # For transcribed audio text
+facial_emotion_container = None
+text_emotion_container = None
+audio_emotion_container = None
+consistency_container = None
+overall_emotion_container = None
+video_placeholder = st.empty() # From original code, ensure it's preserved if used
 
 def get_consistency_level(cosine_sim):
     """Convert cosine similarity to consistency level label"""
@@ -109,27 +123,19 @@ def video_capture_thread():
     
     # Keep checking the queue until should_stop is set or video toggle is disabled
     while not should_stop:
-        # Safely check the session state
         try:
             if not st.session_state.enable_video:
-                time.sleep(0.5)  # Sleep longer when disabled
+                time.sleep(0.5)
                 continue
         except (AttributeError, KeyError):
-            # Session state might not be ready yet, assume enabled
             pass
             
         if not video_frame_queue.full():
-            # No need to do anything - the emotion detection process
-            # is adding frames to the queue directly
             pass
         
-        # Slow down a bit to reduce CPU usage
         time.sleep(0.03)
     
     print("Dashboard video capture thread stopped")
-
-# Add a thread-safe queue for passing data to the main thread
-ui_update_queue = queue.Queue()
 
 def update_dashboard():
     """Update dashboard with latest emotion data"""
@@ -382,20 +388,11 @@ def display_loading_indicator():
     video_container.image(loading_img, channels="BGR", use_container_width=True)
     st.session_state.loading_shown = True
 
-# Define metrics and containers for displaying results
-video_placeholder = st.empty()
-overall_emotion_container = st.empty()
-facial_emotion_container = None
-text_emotion_container = None
-audio_emotion_container = None
-consistency_container = None
-text_container = None # Added to correctly scope the transcription display area
-
 # Update function for dashboard metrics
 def update_metrics():
-    global latest_data, facial_emotion_container, text_emotion_container, audio_emotion_container, consistency_container, text_container, facial_plot_area, audio_plot_area, text_plot_area
+    global latest_data, facial_emotion_container, text_emotion_container, audio_emotion_container, consistency_container, text_container, overall_emotion_container
 
-    if not facial_emotion_container: # Ensure containers are initialized
+    if not facial_emotion_container:
         return
 
     try:
@@ -467,15 +464,12 @@ def update_metrics():
     except Exception as e:
         # st.error(f"Error updating metrics: {e}") # Avoid st calls if this is run in a thread sometimes
         print(f"Error updating dashboard metrics: {e}")
-        import traceback
         print(traceback.format_exc())
 
 # Define shared data receiver thread
 def receive_emotion_data_thread(mp_queue, stop_event):
     """Thread to receive emotion data from detect_emotion.py via multiprocessing queue"""
     global should_stop
-    import time  # Make sure time is available throughout the function
-    import datetime  # Add datetime for better logging
 
     last_check_time = time.time()
     last_update_count = 0
@@ -487,72 +481,50 @@ def receive_emotion_data_thread(mp_queue, stop_event):
             print("Stop event detected in emotion data receiver thread")
             break
             
-        # Safely check the session state
         try:
             if not st.session_state.enable_audio:
-                time.sleep(0.5)  # Sleep longer when disabled
+                time.sleep(0.5)
                 continue
         except (AttributeError, KeyError):
-            # Session state might not be ready yet, assume enabled
             pass
 
-        # First try to get data from the queue if available
         queue_data_received = False
         if mp_queue:
             try:
-                # Try to get data from the multiprocessing queue with a timeout
-                data = mp_queue.get(timeout=0.1)  # Use shorter timeout to check file more frequently
-                # Pass data to the UI update queue
+                data = mp_queue.get(timeout=0.1)
                 ui_update_queue.put(data)
                 queue_data_received = True
                 last_successful_update = time.time()
                 last_update_count += 1
                 print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Queue update #{last_update_count}: Received emotion data with transcription: '{data.get('transcribed_text', '')[:30]}...'")
-                continue  # Skip file check if we got data from queue
+                continue
             except (queue.Empty, MPQueueEmpty):
-                # If no data is available, we'll check the file next
                 pass
             except Exception as e:
                 print(f"Error receiving emotion data from queue: {e}")
 
-        # Check for emotion data saved to file as backup
         try:
-            import tempfile
-            import json
-            
             emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
             if os.path.exists(emotion_path):
-                # Check file modification time to avoid reloading same data
                 mod_time = os.path.getmtime(emotion_path)
                 current_time = time.time()
                 
-                # Force check at least every second even if not modified
                 time_since_last_check = current_time - last_check_time
                 time_since_last_update = current_time - last_successful_update
                 
-                # Process if:
-                # 1. File has been modified since last check, OR
-                # 2. It's been more than 1 second since last check (force periodic checks), OR
-                # 3. It's been more than 5 seconds since last successful update (recovery mechanism)
                 if (not hasattr(receive_emotion_data_thread, 'last_emotion_time') or 
                     mod_time > getattr(receive_emotion_data_thread, 'last_emotion_time', 0) or
                     time_since_last_check > 1.0 or
                     time_since_last_update > 5.0):
                     
-                    # Update last check time regardless of whether we read successfully
                     last_check_time = current_time
                     receive_emotion_data_thread.last_check_time = current_time
                     
-                    # Try to read the file with retry logic
                     for attempt in range(3):
                         try:
                             with open(emotion_path, 'r') as f:
                                 data = json.load(f)
                                 
-                                # Always update the UI with new data from the file
-                                # This ensures we get the latest transcriptions and emotions
-                                
-                                # Check if the data is truly new or different
                                 new_data = True
                                 last_text = ""
                                 last_update_id = ""
@@ -566,69 +538,54 @@ def receive_emotion_data_thread(mp_queue, stop_event):
                                 current_text = data.get('transcribed_text', '')
                                 current_update_id = data.get('update_id', '')
                                 
-                                # Make sure transcription is populated
                                 has_transcription = 'transcribed_text' in data and data['transcribed_text']
                                 
-                                # Improved update logic - check for meaningful changes
                                 meaningful_change = False
                                 
-                                # Check if this is new data or first data
                                 if new_data or not hasattr(receive_emotion_data_thread, 'last_data'):
                                     meaningful_change = True
                                 
-                                # Check specially for transcription changes
                                 transcription_changed = current_text != last_text and has_transcription
                                 if transcription_changed:
                                     meaningful_change = True
                                 
-                                # Always update timestamps and tracking variables
                                 receive_emotion_data_thread.last_data = data.copy() if data else {}
                                 receive_emotion_data_thread.last_text = current_text
                                 receive_emotion_data_thread.last_update_id = current_update_id
                                 last_successful_update = current_time
                                 
-                                # Put data in queue if we have a meaningful change
                                 if meaningful_change:
-                                    # Send normal update
                                     ui_update_queue.put(data)
                                     
-                                    # Log if we have a new transcription
                                     if transcription_changed:
                                         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] File update: New transcription detected: '{current_text[:30]}...'")
                                         
-                                        # Only force an update for transcription changes
-                                        # This reduces the number of forced updates
                                         data_with_force = data.copy()
                                         data_with_force['force_update'] = True
                                         ui_update_queue.put(data_with_force)
                                 
-                                # Update time even if data hasn't changed
                                 receive_emotion_data_thread.last_emotion_time = mod_time
                                 break
                                 
                         except json.JSONDecodeError:
-                            # File might be partially written, try again after a short delay
                             time.sleep(0.05)
                         except Exception as e:
                             print(f"Error reading emotion file (attempt {attempt+1}): {e}")
                             time.sleep(0.05)
                             
-                    # If it's been too long without updates, log a warning
                     if time_since_last_update > 10.0 and not queue_data_received:
                         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] WARNING: No emotion updates received for {time_since_last_update:.1f} seconds")
         except Exception as e:
             print(f"Error checking emotion file: {e}")
             
-        # Short sleep to avoid burning CPU
         time.sleep(0.1)
     
-    # Check which condition caused the thread to stop
     if should_stop:
         print("Audio data receiver thread stopped due to global stop flag")
     else:
         print("Audio data receiver thread stopped due to audio toggle disabled")
 
-# Main Streamlit app
+# Main Streamlit app UI layout
 st.title("AffectLink Real-time Multimodal Emotion Analysis")
 
 # Create placeholders for dynamic content
@@ -651,42 +608,37 @@ with col2:
     st.markdown("---")
     st.markdown("### Overall Consistency")
     consistency_container = st.empty()
-    overall_emotion_container = st.empty() # Added in previous step
+    overall_emotion_container = st.empty()
 
 # Define the main function for the dashboard application
-def main(emotion_queue=None, stop_event=None, frame_queue=None):
+def main(emotion_queue_param=None, stop_event_param=None, frame_queue_param=None): # Renamed params to avoid conflict
     """Start the Streamlit dashboard using provided IPC queues"""
-    global should_stop, video_frame_queue, emotion_data_queue, video_thread, audio_thread
+    global should_stop, video_frame_queue, emotion_data_queue, video_thread, audio_thread, stop_event
     
-    # Assign provided queues to global variables
-    video_frame_queue = frame_queue
-    emotion_data_queue = emotion_queue
+    video_frame_queue = frame_queue_param
+    emotion_data_queue = emotion_queue_param
     
-    # Start video capture thread only if video processing is enabled
-    # Use our helper function for consistency
+    # Use the global stop_event if no specific one is passed, or the passed one
+    current_stop_event = stop_event_param if stop_event_param is not None else stop_event
+
     restart_video_thread()
+    restart_audio_thread(queue=emotion_data_queue, stop_evt=current_stop_event)
     
-    # Start emotion data receiving thread if a queue is provided and audio processing is enabled
-    # Use our helper function for consistency
-    restart_audio_thread(queue=emotion_data_queue, stop_evt=stop_event)
-    
-    # Update dashboard in a loop
     while not should_stop:
         update_dashboard()
-        update_metrics()  # Refresh emotion analysis metrics
+        update_metrics()
         
-        # Check if stop event is set
-        if stop_event and stop_event.is_set():
+        if current_stop_event and current_stop_event.is_set():
             should_stop = True
             print("Stop event detected in dashboard main loop")
             break
             
-        time.sleep(0.1)  # Update every 100ms
+        time.sleep(0.1)
         
     print("Dashboard loop exited")
 
-# Set up the app first with the functions before defining the UI
-# This ensures functions are defined before use in callbacks
+# Set up the app first with the functions before defining the UI (Organizational comment)
+# This ensures functions are defined before use in callbacks (Organizational comment)
 
 def restart_video_thread(enabled=None):
     """Safely restart the video thread based on toggle state"""
@@ -715,21 +667,18 @@ def restart_video_thread(enabled=None):
     else:
         print("Video processing disabled, no thread started")
 
-def restart_audio_thread(enabled=None, queue=None, stop_evt=None):
+def restart_audio_thread(enabled=None, queue=None, stop_evt=None): # Renamed queue to queue_param
     """Safely restart the audio thread based on toggle state"""
     global audio_thread, should_stop, emotion_data_queue
     
-    # If no value is provided, check session state (with fallback)
     if enabled is None:
         try:
             enabled = st.session_state.enable_audio
         except (AttributeError, KeyError):
-            # If session state isn't ready, default to enabled
             enabled = True
     
     # If no queue provided, use the global one
-    if queue is None:
-        queue = emotion_data_queue
+    current_queue = queue if queue is not None else emotion_data_queue # Use param if provided
     
     # Stop the existing thread if it's running
     if audio_thread and audio_thread.is_alive():
@@ -737,10 +686,10 @@ def restart_audio_thread(enabled=None, queue=None, stop_evt=None):
         print("Existing audio thread will terminate on next loop")
     
     # Only start a new thread if enabled and we have a queue
-    if enabled and queue is not None:
+    if enabled and current_queue is not None:
         audio_thread = threading.Thread(
             target=receive_emotion_data_thread,
-            args=(queue, stop_evt)
+            args=(current_queue, stop_evt) # Use current_queue
         )
         audio_thread.daemon = True
         audio_thread.start()
@@ -753,41 +702,31 @@ def restart_audio_thread(enabled=None, queue=None, stop_evt=None):
 
 # If run directly (for testing)
 if __name__ == "__main__":
-    # Check for environment variable that indicates if detector is running
-    import os
     detector_running = os.environ.get("AFFECTLINK_DETECTOR_RUNNING") == "1"
     
     print(f"Detector running: {detector_running}")
     
     if detector_running:
-        # Check for temporary files from detector
-        import tempfile
         frame_path = os.path.join(tempfile.gettempdir(), "affectlink_frame.jpg")
         emotion_path = os.path.join(tempfile.gettempdir(), "affectlink_emotion.json")
         
-        # Create empty queues to pass to main
-        frame_queue = queue.Queue(maxsize=5)
-        emotion_queue = queue.Queue(maxsize=10)
+        # Create empty queues to pass to main (local to this block)
+        main_frame_queue = queue.Queue(maxsize=5)
+        main_emotion_queue = queue.Queue(maxsize=10)
         
         print(f"Running in detector-connected mode")
         print(f"Will look for frames at: {frame_path}")
         print(f"Will look for emotions at: {emotion_path}")
         
-        # Run main with the queues
-        main(emotion_queue, None, frame_queue)
+        main(main_emotion_queue, None, main_frame_queue)
     else:
-        # Run in demo mode with generated data
         print("Starting dashboard in standalone demo mode")
-        # For standalone testing without Manager, use local queues
         local_frame_queue = queue.Queue(maxsize=5)
         local_emotion_queue = queue.Queue(maxsize=10)
         
-        # Create a demo thread to simulate frames and emotion data
         def demo_data_provider():
             """Generate demo data for testing the dashboard standalone"""
-            import numpy as np
-            import time
-            
+            # Imports for numpy, time, random are at the top level now
             while True:
                 # Create a demo frame (black with timestamp)
                 frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -836,5 +775,3 @@ if __name__ == "__main__":
         
         # Run the dashboard with our local demo queues
         main(local_emotion_queue, None, local_frame_queue)
-        
-    # End of main standalone execution

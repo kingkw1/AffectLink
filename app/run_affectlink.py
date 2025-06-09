@@ -38,7 +38,6 @@ def clear_affectlink_json_files():
         except Exception as e:
             print(f"⚠️ Error pre-cleaning file {file_path}: {e}")
 
-
 def find_available_camera(preferred_index=0, use_directshow=True):
     """
     Find an available camera by trying multiple indices and backends.
