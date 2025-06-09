@@ -61,13 +61,14 @@ def call_text_classifier_api(text_input: str, api_url: str):
         response_json = response.json()
 
         predictions = response_json.get('predictions', [])
-        if predictions and len(predictions) > 0 and isinstance(predictions[0], dict):
-            # The API returns the top prediction directly as a dictionary in a list
-            # Return the first (and likely only) dictionary of prediction
-            return predictions[0] # Returns a single dictionary like {'label': 'joy', 'score': 0.98}
-        else:
-            logger.warning(f"Text classifier API returned unexpected prediction format: {response_json}")
-            return {"label": "unknown", "score": 0.0} # Return a default unknown emotion
+        return predictions
+        # if predictions and len(predictions) > 0 and isinstance(predictions[0], dict):
+        #     # The API returns the top prediction directly as a dictionary in a list
+        #     # Return the first (and likely only) dictionary of prediction
+        #     return predictions[0] # Returns a single dictionary like {'label': 'joy', 'score': 0.98}
+        # else:
+        #     logger.warning(f"Text classifier API returned unexpected prediction format: {response_json}")
+        #     return {"label": "unknown", "score": 0.0} # Return a default unknown emotion
     except requests.exceptions.Timeout:
         logger.error(f"Text classifier API call timed out after 10 seconds to {api_url}")
         return {"label": "unknown", "score": 0.0}
@@ -675,83 +676,110 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, text_emotion_
                             audio_processing_loop.buffer_reset_count = 0
                 elif not text or not text.strip():
                     logger.warning("No transcription generated - will try again with fresh audio")
-
+                
                 # Get all text emotion scores
                 # Ensure text is valid before calling the text classifier
                 if text and text.strip() and text.strip() != PLACEHOLDER_TEXT:
                     logger.info(f"Attempting text emotion classification for: '{text[:100]}'")
-                    # --- NEW CONDITIONAL LOGIC FOR TEXT CLASSIFIER API ---
+                    
+                    text_emotion_full_results = [] # This will store the list of {'emotion': 'label', 'score': value}
+                    raw_dominant_text_emotion = "unknown"
+                    raw_dominant_text_score = 0.0
+
                     if use_text_classifier_api:
                         logger.info("Using Text Classifier API for emotion analysis.")
-                        text_emotion_scores_raw = call_text_classifier_api(text, TEXT_CLASSIFIER_API_URL)
-                    else:
-                        logger.info("Using local Text Classifier model for emotion analysis.")
-                        # The local model likely returns a list of lists of dicts, e.g., [[{'label': 'joy', 'score': 0.9}]]
-                        # This will need to be handled differently if the local model's output changes.
-                        text_emotion_scores_raw = text_emotion_classifier(text) # Existing local call
-                    # --- END NEW CONDITIONAL LOGIC ---
+                        api_response = call_text_classifier_api(text, TEXT_CLASSIFIER_API_URL)
+                        logger.info(f"Raw API response for text emotion: {api_response}")
 
-                    logger.info(f"Raw text emotion scores: {text_emotion_scores_raw}")
-
-                    # --- MODIFIED LOGIC HERE ---
-                    text_emotion_data = None
-                    if isinstance(text_emotion_scores_raw, dict) and 'label' in text_emotion_scores_raw and 'score' in text_emotion_scores_raw:
-                        # This is the expected format from your API call (single dict)
-                        text_emotion_data = text_emotion_scores_raw
-                    elif isinstance(text_emotion_scores_raw, list) and \
-                         len(text_emotion_scores_raw) > 0 and isinstance(text_emotion_scores_raw[0], list) and \
-                         len(text_emotion_scores_raw[0]) > 0 and isinstance(text_emotion_scores_raw[0][0], dict) and \
-                         'label' in text_emotion_scores_raw[0][0] and 'score' in text_emotion_scores_raw[0][0]:
-                        # This handles the original HuggingFace pipeline output format [[{...}]]
-                        # where the local model might still return it this way.
-                        text_emotion_data = text_emotion_scores_raw[0][0]
-                    elif isinstance(text_emotion_scores_raw, list) and \
-                         len(text_emotion_scores_raw) > 0 and isinstance(text_emotion_scores_raw[0], dict) and \
-                         'label' in text_emotion_scores_raw[0] and 'score' in text_emotion_scores_raw[0]:
-                        # This handles if the local model sometimes returns [{'label': 'joy', 'score': 0.9}]
-                        text_emotion_data = text_emotion_scores_raw[0]
-
-                    if text_emotion_data:
-                        # Map raw emotion to unified emotion
-                        unified_text_emotion = TEXT_TO_UNIFIED.get(text_emotion_data['label'], "unknown")
-                        text_score = text_emotion_data['score']
-
-                        # Construct unified_text_scores dictionary for consistency
-                        # This assumes you want a dict with all unified emotions, with the dominant one having its score
-                        unified_text_scores = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
-                        unified_text_scores[unified_text_emotion] = text_score
-
-                        logger.info(f"Unified text scores: {unified_text_scores}")
-                        shared_state['text_emotion_unified_scores'] = unified_text_scores # Store for main_processor
-
-                        shared_state['text_emotion_history'].append({
-                            'timestamp': time.time(),
-                            'scores': unified_text_scores
-                        })
-
-                        # Determine dominant text emotion from unified scores for current display
-                        if unified_text_scores and any(s > 0 for s in unified_text_scores.values()):
-                            dominant_text_emotion = max(unified_text_scores, key=unified_text_scores.get)
-                            confidence = unified_text_scores[dominant_text_emotion]
-                            shared_state['text_emotion'] = (dominant_text_emotion, confidence)
-                            logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({dominant_text_emotion}, {confidence:.2f})")
-                            unified_text_emotion = dominant_text_emotion # Update for smoothing
-                            text_score = confidence                       # Update for smoothing
+                        if api_response and isinstance(api_response, list) and len(api_response) > 0:
+                            # Expecting only one prediction for one text input (api_response[0])
+                            first_prediction_data = api_response[0] 
+                            if isinstance(first_prediction_data, dict):
+                                # Extract dominant emotion and score from the API's top-level fields
+                                raw_dominant_text_emotion = first_prediction_data.get('dominant_emotion', "unknown")
+                                raw_dominant_text_score = first_prediction_data.get('dominant_emotion_score', 0.0)
+                                
+                                # This is crucial: get the full scores list from the API response
+                                text_emotion_full_results = first_prediction_data.get('full_emotion_scores', [])
+                                
+                                if not text_emotion_full_results:
+                                    logger.warning("Text classifier API response did not contain 'full_emotion_scores'. Attempting to derive from dominant.")
+                                    # Fallback: if full_emotion_scores is missing, create a single entry
+                                    if raw_dominant_text_emotion != "unknown":
+                                        text_emotion_full_results = [{'emotion': raw_dominant_text_emotion, 'score': raw_dominant_text_score}]
+                            else:
+                                logger.warning(f"Unexpected format for first prediction in API response: {type(first_prediction_data)}")
                         else:
-                            logger.warning(f"Unified text scores are empty, all zero, or invalid after normalization: {unified_text_scores}")
-                            shared_state['text_emotion'] = ("unknown", 0.0)
-                            unified_text_emotion = "unknown"
-                            text_score = 0.0
-                    else:
-                        logger.warning(f"Text classifier returned no valid scores or unexpected format after all checks: {text_emotion_scores_raw}")
-                        shared_state['text_emotion'] = ("unknown", 0.0)
-                        unified_text_emotion = "unknown"
-                        text_score = 0.0
-                else: # if text is invalid or placeholder
+                            logger.warning(f"Text classifier API returned empty or invalid response: {api_response}")
+                    else: # Using local Text Classifier model
+                        logger.info("Using local Text Classifier model for emotion analysis.")
+                        # Assumption: Local model is configured to return top_k=None for all scores,
+                        # yielding format like: [[{'label': 'emotion1', 'score': X}, {'label': 'emotion2', 'score': Y}, ...]]
+                        local_model_output = text_emotion_classifier(text) 
+                        logger.info(f"Raw local model output for text emotion: {local_model_output}")
+
+                        if local_model_output and isinstance(local_model_output, list) and len(local_model_output) > 0 and \
+                           isinstance(local_model_output[0], list):
+                            
+                            # The full list of scores is the first inner list
+                            text_emotion_full_results = local_model_output[0]
+                            
+                            # Determine dominant emotion from local model's full results (usually the first one if sorted)
+                            if text_emotion_full_results and isinstance(text_emotion_full_results[0], dict) and \
+                               'label' in text_emotion_full_results[0] and 'score' in text_emotion_full_results[0]:
+                                raw_dominant_text_emotion = text_emotion_full_results[0]['label']
+                                raw_dominant_text_score = text_emotion_full_results[0]['score']
+                            else:
+                                logger.warning("Local text classifier full results not in expected dict format to determine dominant.")
+                        else:
+                            logger.warning(f"Local text classifier returned empty or invalid format: {local_model_output}")
+
+                    # --- Now process the consolidated text_emotion_full_results ---
+                    # Store the raw full scores (list of dicts) in shared_state for main_processor
+                    shared_state['text_emotion_full_scores'] = text_emotion_full_results
+
+                    # Create the unified score dictionary for main_processor's text_emotion_unified_scores
+                    # This maps raw labels to unified labels and normalizes the scores
+                    unified_text_scores = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
+                    if text_emotion_full_results:
+                        for item in text_emotion_full_results:
+                            # Use .get() and check for both 'emotion' (API) and 'label' (HF local) keys
+                            raw_label = item.get('emotion') or item.get('label')
+                            score = item.get('score', 0.0)
+                            
+                            unified_label = TEXT_TO_UNIFIED.get(raw_label)
+                            if unified_label and unified_label in UNIFIED_EMOTIONS:
+                                unified_text_scores[unified_label] += score # Summing scores if multiple raw labels map to same unified
+
+                    # Normalize unified_text_scores to ensure they sum to 1
+                    total_unified_score = sum(unified_text_scores.values())
+                    if total_unified_score > 0:
+                        unified_text_scores = {k: v / total_unified_score for k, v in unified_text_scores.items()}
+                    
+                    logger.info(f"Unified text scores (normalized) for shared_state: {unified_text_scores}")
+                    shared_state['text_emotion_unified_scores'] = unified_text_scores 
+
+                    # Determine dominant text emotion from the *unified* scores for immediate display/smoothing
+                    # This uses the most confident unified emotion from the normalized vector.
+                    current_unified_text_emotion = "unknown"
+                    current_text_score = 0.0
+                    if unified_text_scores and any(s > 0 for s in unified_text_scores.values()):
+                        current_unified_text_emotion = max(unified_text_scores, key=unified_text_scores.get)
+                        current_text_score = unified_text_scores[current_unified_text_emotion]
+
+                    shared_state['text_emotion'] = (current_unified_text_emotion, current_text_score)
+                    logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({current_unified_text_emotion}, {current_text_score:.2f})")
+
+                    # Append the *full unified scores* to history for more comprehensive smoothing if needed later
+                    shared_state['text_emotion_history'].append({
+                        'timestamp': time.time(),
+                        'scores': unified_text_scores
+                    })
+                else: # if text is invalid or placeholder (text is None, empty, or "Waiting for audio transcription...")
                     logger.warning(f"Skipping text emotion classification because text is invalid or placeholder: '{text}'")
                     shared_state['text_emotion'] = ("unknown", 0.0)
-                    unified_text_emotion = "unknown"
-                    text_score = 0.0
+                    shared_state['text_emotion_unified_scores'] = {emotion: 0.0 for emotion in UNIFIED_EMOTIONS}
+                    shared_state['text_emotion_full_scores'] = [] # Ensure this is reset too when no valid text
 
                 # Get audio emotion scores
                 logger.debug("Analyzing audio emotion...")
@@ -872,7 +900,7 @@ def record_audio(shared_state):
         if current_time - last_stats_time > 5:  # Every 5 seconds
             avg_level = sum(audio_level_tracker) / len(audio_level_tracker) if audio_level_tracker else 0
             peak_level = max(audio_level_tracker) if audio_level_tracker else 0
-            logger.info(f"Audio levels: current={audio_rms:.6f}, avg={avg_level:.6f}, peak={peak_level:.6f}, buffer_size={len(audio_buffer)}")
+            # logger.info(f"Audio levels: current={audio_rms:.6f}, avg={avg_level:.6f}, peak={peak_level:.6f}, buffer_size={len(audio_buffer)}")
 
             # Detailed buffer diagnostics
             if audio_buffer:
@@ -881,7 +909,7 @@ def record_audio(shared_state):
                     buffer_min = np.min(buffer_array)
                     buffer_max = np.max(buffer_array)
                     buffer_std = np.std(buffer_array)
-                    logger.info(f"Buffer stats: min={buffer_min:.6f}, max={buffer_max:.6f}, std={buffer_std:.6f}")
+                    # logger.info(f"Buffer stats: min={buffer_min:.6f}, max={buffer_max:.6f}, std={buffer_std:.6f}")
                 else:
                     logger.info("Buffer stats: audio_buffer is currently empty for stats calculation.")
 

@@ -79,22 +79,6 @@ def get_consistency_level(cosine_sim):
     else: # Covers 0.01 < cosine_sim < 0.3
         return "Very Low"
 
-def calculate_cosine_similarity(vector_a, vector_b):
-    """
-    Calculate cosine similarity between two vectors
-    """
-    if len(vector_a) != len(vector_b):
-        return 0.0
-        
-    dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
-    magnitude_a = math.sqrt(sum(a * a for a in vector_a))
-    magnitude_b = math.sqrt(sum(b * b for b in vector_b))
-    
-    if magnitude_a == 0 or magnitude_b == 0:
-        return 0.0
-        
-    return dot_product / (magnitude_a * magnitude_b)
-
 
 def create_unified_emotion_vector(emotion_scores, mapping_dict):
     """
@@ -207,6 +191,22 @@ def clear_stale_files():
 # Clear stale files at module import time
 clear_stale_files()
 
+def calculate_cosine_similarity(vector_a, vector_b):
+    """
+    Calculate cosine similarity between two vectors
+    """
+    if len(vector_a) != len(vector_b):
+        return 0.0
+        
+    dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+    magnitude_a = math.sqrt(sum(a * a for a in vector_a))
+    magnitude_b = math.sqrt(sum(b * b for b in vector_b))
+    
+    if magnitude_a == 0 or magnitude_b == 0:
+        return 0.0
+        
+    return dot_product / (magnitude_a * magnitude_b)
+
 def calculate_average_multimodal_similarity(facial_vector, audio_vector, text_vector):
     """
     Calculate average cosine similarity across three modalities:
@@ -240,7 +240,10 @@ def calculate_average_multimodal_similarity(facial_vector, audio_vector, text_ve
         overall_cosine_similarity = sum(valid_similarities) / len(valid_similarities)
     else:
         overall_cosine_similarity = 0.0 # Default if no valid pairs
-        
+    
+    logger.debug(f"Cosine similarities: facial-audio={similarity_fa:.3f}, facial-text={similarity_ft:.3f}, audio-text={similarity_at:.3f}")
+    logger.debug(f"Valid similarities count: {len(valid_similarities)}; Overall cosine similarity: {overall_cosine_similarity:.3f}")
+
     return overall_cosine_similarity
 
 def load_models():
@@ -316,7 +319,15 @@ def load_models():
     
     return whisper_model, text_classifier, audio_feature_extractor, audio_classifier, device
 
-def main(emotion_queue=None, stop_event=None, camera_index=0):
+def main(
+        emotion_queue=None, 
+        stop_event=None, 
+        camera_index=0, 
+        use_whisper_api_toggle = True,
+        use_ser_api_toggle = True,
+        use_text_classifier_api_toggle = True
+    ):
+
     """Main function for emotion detection."""
     global shared_state, whisper_model, text_classifier, audio_feature_extractor, audio_classifier, face_cascade
     # Ensure ser_model and ser_processor are correctly scoped or passed if needed by audio_processing_loop
@@ -342,7 +353,11 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
         print(f"Detector received shared frame queue: {stop_event['shared_frame_data']}")
     
     # Load models
-    whisper_model, text_classifier, audio_feature_extractor, audio_classifier, device = load_models()
+    if not (use_whisper_api_toggle and use_ser_api_toggle and use_text_classifier_api_toggle):
+        whisper_model, text_classifier, audio_feature_extractor, audio_classifier, device = load_models()
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
     # Event for synchronization between video and audio threads
     video_started_event = threading.Event()
@@ -359,10 +374,6 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
     # Create audio analysis data structures
     # audio_emotion_log = [] # Removed, now part of shared_state
     audio_lock = threading.Lock()
-
-    use_whisper_api_toggle = True # Set to True to use API, False for local
-    use_ser_api_toggle = True # Set to True to use API, False for local
-    use_text_classifier_api_toggle = True # <--- NEW TOGGLE: Set to True to use API, False for local
 
     # Start audio processing thread with error handling
     print("Starting audio processing thread...")
@@ -424,6 +435,7 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
                 "transcribed_text": shared_state.get('transcribed_text', "Waiting for audio transcription..."),
                 "facial_emotion_full_scores": shared_state.get('facial_emotion_full_scores', {}),
                 "audio_emotion_full_scores": shared_state.get('audio_emotion_full_scores', []),
+                "text_emotion_full_scores": shared_state.get('text_emotion_full_scores', []), # <-- ADD THIS LINE
                 "text_emotion_smoothed": shared_state.get('text_emotion_smoothed', ("unknown", 0.0)),
                 "audio_emotion_smoothed": shared_state.get('audio_emotion_smoothed', ("unknown", 0.0)),
                 "facial_emotion_history": list(shared_state.get('facial_emotion_history', [])), # deque to list
@@ -447,16 +459,17 @@ def main(emotion_queue=None, stop_event=None, camera_index=0):
             audio_scores_dict = {item['emotion']: item['score'] for item in audio_emotion_data if isinstance(item, dict) and 'emotion' in item and 'score' in item}
             audio_vector = create_unified_emotion_vector(audio_scores_dict, SER_TO_UNIFIED)
             
-            # Text data is already in unified format from audio_emotion_processor
-            # but create_unified_emotion_vector expects a mapping, so we pass an identity-like mapping or ensure it's already a vector
-            # For simplicity, if text_emotion_data is already a unified score dict, we can use it directly if it matches UNIFIED_EMOTIONS order
-            # Or, ensure create_unified_emotion_vector can handle it or pre-process it.
-            # Assuming text_emotion_data is {unified_emotion: score, ...}
-            text_vector = [text_emotion_data.get(emotion, 0.0) for emotion in UNIFIED_EMOTIONS]
-            # Normalize text_vector if not already normalized
-            text_total = sum(text_vector)
-            if text_total > 0:
-                text_vector = [score/text_total for score in text_vector]
+            # For text, retrieve the full emotion scores list from shared_state
+            text_emotion_data_for_vector = shared_state.get('text_emotion_full_scores', [])
+            # Convert the list of dicts {'emotion': label, 'score': value} to a dict for create_unified_emotion_vector
+            # Handle both 'emotion' and 'label' keys from the full_scores list
+            text_scores_dict = {
+                (item.get('emotion') or item.get('label')): item.get('score', 0.0) 
+                for item in text_emotion_data_for_vector 
+                if isinstance(item, dict) and ((item.get('emotion') or item.get('label')) is not None) and item.get('score') is not None
+            }
+            # Use create_unified_emotion_vector with the text-specific mapping
+            text_vector = create_unified_emotion_vector(text_scores_dict, TEXT_TO_UNIFIED)
 
             # Get overall cosine similarity
             overall_cosine_similarity = calculate_average_multimodal_similarity(facial_vector, audio_vector, text_vector)
