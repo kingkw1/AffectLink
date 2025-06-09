@@ -58,14 +58,14 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
     *Note: This will install all necessary libraries, including `deepface`, `sounddevice`, `streamlit`, `mlflow`, `transformers`, etc.*
 
 3.  **System-Level Dependencies (Linux):**
-        In addition to the Python packages, AffectLink requires certain system-level libraries. If you are running a Debian/Ubuntu-based Linux system, you can install these with:
+    In addition to the Python packages, AffectLink requires certain system-level libraries. If you are running a Debian/Ubuntu-based Linux system, you can install these with:
 
-        ```bash
-        sudo apt-get update
-        sudo apt-get install -y libgl1-mesa-glx portaudio19-dev ffmpeg
-        ```
+    ```bash
+    sudo apt-get update
+    sudo apt-get install -y libgl1-mesa-glx portaudio19-dev ffmpeg
+    ```
 
-        These install dependencies for OpenCV (facial analysis), SoundDevice (audio input), and FFmpeg (audio/video processing).
+    These install dependencies for OpenCV (facial analysis), SoundDevice (audio input), and FFmpeg (audio/video processing).
 
 4.  **Download Pre-trained Models (First Run):**
     The first time `main_processor.py` (which is run by `run_app.py`) is executed, it will attempt to download the pre-trained DeepFace, Whisper, and Hugging Face models. Ensure you have an internet connection for this step. These models will be cached locally.
@@ -75,7 +75,6 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
 
     * **A. Register Models to MLflow:**
         * Open HP AI Studio and navigate to the project where you intend to run AffectLink.
-        * Locate the script(s) responsible for model registration (e.g., within `main_processor.py` or a dedicated notebook, which `run_app.py` orchestrates).
         * Run `python run_app.py` for the first time. This script is designed to:
             * Trigger the necessary model downloads (if not already cached).
             * Initialize MLflow tracking.
@@ -94,18 +93,27 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
         * Once deployed, navigate back to the "Deployments" tab. For each deployment, click the "Play" button to spin up the local API endpoint.
         * **Obtain Endpoint URLs:** After each model is running, click on the **link icon** next to its deployment name. This will open a new browser tab with the Swagger UI for that specific model's endpoint. **Copy the full URL from your browser's address bar for each model.**
 
-5.  **Configure AffectLink with Deployed Model Endpoints (CRITICAL):**
-    Since your Streamlit application (`dashboard.py`) runs as a separate process and connects to these dynamically deployed models, you need to update its configuration with the specific endpoint URLs you obtained from HP AI Studio.
+6.  **Configure AffectLink with Deployed Model Endpoints (CRITICAL):**
+    Since your Streamlit application (`dashboard.py`) runs as a separate process and connects to these dynamically deployed models, you need to provide their dynamically assigned API endpoint URLs via environment variables.
 
-    * Open the `constants.py` file located in the `src/` directory of your cloned repository.
-    * Locate the variables associated with the Swagger API URLs. These will likely be:
-        * `WHISPER_API_URL`
-        * `SER_API_URL`
-        * `TEXT_CLASSIFIER_API_URL`
-    * **Replace the placeholder URLs (e.g., `http://localhost:XXXX/v1/models/whisper:predict`) with the actual URLs you copied from HP AI Studio's Swagger UI for each respective model.**
-    * Save the `constants.py` file.
+    * **Set Environment Variables:** Before running `run_app.py`, set the following environment variables with the actual URLs you obtained from HP AI Studio's Swagger UI for each respective model.
+        * **For Windows (PowerShell):**
+            ```powershell
+            $env:AFFECTLINK_WHISPER_API_URL="http://localhost:XXXXX/v1/models/whisper:predict"
+            $env:AFFECTLINK_SER_API_URL="http://localhost:XXXXX/v1/models/ser:predict"
+            $env:AFFECTLINK_TEXT_CLASSIFIER_API_URL="http://localhost:XXXXX/v1/models/text_classifier:predict"
+            # Replace XXXXX with the respective dynamic port numbers.
+            ```
+        * **For Linux/macOS (Bash/Zsh):**
+            ```bash
+            export AFFECTLINK_WHISPER_API_URL="http://localhost:XXXXX/v1/models/whisper:predict"
+            export AFFECTLINK_SER_API_URL="http://localhost:XXXXX/v1/models/ser:predict"
+            export AFFECTLINK_TEXT_CLASSIFIER_API_URL="http://localhost:XXXXX/v1/models/text_classifier:predict"
+            # Replace XXXXX with the respective dynamic port numbers
+            ```
+        * *Remember to open a new terminal or PowerShell window for these variables to take effect if you set them permanently.*
 
-6.  **Run the AffectLink Application ("Run All" for Judging):**
+7.  **Run the AffectLink Application ("Run All" for Judging):**
     Now that your models are deployed via HP AI Studio and your application is configured with their endpoints, you can launch AffectLink.
 
     ```bash
@@ -114,30 +122,10 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
     This script will:
     * Start the `main_processor.py` for audio and video capture, and emotion analysis.
     * Launch the Streamlit web application, which will automatically open in your default browser.
-    * The Streamlit UI will then connect to your locally deployed AI Studio model endpoints for Whisper, SER, and Text Emotion, and use the local DeepFace library for facial analysis.
+    * The Streamlit UI will then connect to your locally deployed AI Studio model endpoints for Whisper, SER, and Text Emotion (using the URLs from your environment variables), and use the local DeepFace library for facial analysis.
 
     *Troubleshooting:* If the Streamlit application doesn't open automatically, look for a message in your terminal indicating the local URL (e.g., `http://localhost:8501`).
-
-6.  **Configure AffectLink with Deployed Model Endpoints (CRITICAL):**
-    Since your Streamlit application (`dashboard.py`) runs as a separate process and connects to these dynamically deployed models, you need to provide their dynamically assigned API endpoint URLs via environment variables.
-
-    * **Set Environment Variables:** Before running `run_app.py`, set the following environment variables with the actual URLs you obtained from HP AI Studio's Swagger UI for each respective model.
-        * **For Windows (PowerShell):**
-            ```powershell
-            $env:AFFECTLINK_WHISPER_API_URL="http://localhost:PORT_WHISPER/v1/models/whisper:predict"
-            $env:AFFECTLINK_SER_API_URL="http://localhost:PORT_SER/v1/models/ser:predict"
-            $env:AFFECTLINK_TEXT_CLASSIFIER_API_URL="http://localhost:PORT_TEXT_CLASSIFIER/v1/models/text_classifier:predict"
-            # Replace PORT_WHISPER, PORT_SER, PORT_TEXT_CLASSIFIER with the actual dynamic port numbers.
-            ```
-        * **For Linux/macOS (Bash/Zsh):**
-            ```bash
-            export AFFECTLINK_WHISPER_API_URL="http://localhost:PORT_WHISPER/v1/models/whisper:predict"
-            export AFFECTLINK_SER_API_URL="http://localhost:PORT_SER/v1/models/ser:predict"
-            export AFFECTLINK_TEXT_CLASSIFIER_API_URL="http://localhost:PORT_TEXT_CLASSIFIER/v1/models/text_classifier:predict"
-            # Replace PORT_WHISPER, PORT_SER, PORT_TEXT_CLASSIFIER with the actual dynamic port numbers.
-            ```
-        * *Remember to open a new terminal or PowerShell window for these variables to take effect if you set them permanently.*
-
+    
 
 ### Expected Behavior
 
