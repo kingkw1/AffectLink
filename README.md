@@ -50,7 +50,7 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
     cd AffectLink
     ```
 
-2.  **Set Up and Install Python Dependencies:**
+2.  **Set Up and Install Python Dependencies for Local (we will run python from local machine, to communicate with models deployed in AI Studio):**
     It's highly recommended to use a Python virtual environment to manage dependencies. This ensures that AffectLink's libraries don't conflict with other Python projects on your system.
 
     * **A. Create a Virtual Environment (Recommended Python 3.10):**
@@ -166,8 +166,26 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
                 **Advanced GPU Troubleshooting (If time allows):** If you wish to troubleshoot TensorFlow's GPU further, ensure your `tensorflow` and `tf_keras` packages are designed for GPU (e.g., by checking their PyPI pages for specific GPU wheels). Sometimes, specific environment variables or different wheel files are needed. Since PyTorch is working, your CUDA installation is likely fine; the issue is specific to TensorFlow's integration. Refer to the official TensorFlow GPU installation guide for your specific version.
 
             * **General Installation Issues:** If other issues persist, ensure you have stable internet connection for downloads.
+    
+3.  **Download Pre-trained Models (First Run):**
+    AI Studio will need internet access to download some dependencies. Also, the first time `main_processor.py` (which is run by `run_app.py`) is executed, it will attempt to download the pre-trained DeepFace, Whisper, and Hugging Face models. Ensure you have an internet connection for this step. These models will be cached locally.
 
-3.  **System-Level Dependencies (Linux):**
+4.  **Set Up and Install Dependencies for HP AI Studio:**
+
+    * **A. Setup Project**
+        * **1. Project Details**
+            * Enter a name and (optionally) a brief description of the project
+            * Git Repository URL: https://github.com/kingkw1/AffectLink.git
+            * Git Local Folder: Select the git folder where you cloned the repo in the previous step.
+        * **2. Continue without "Connecting Your Data"**
+        * **3. Setup Workspace**
+            * Create a new workspace. Select Deeplearning GPU from the images catalog. 
+            * Choose a workspace name and setup with GPU configuration
+            * Select "Add Custom Libraries" and select audio_requirements.txt from inside of AffectLink/deployment. 
+            * Select Validate and wait for confirmation that validation is complete
+            * Create Workspace
+
+    * **B. Install System-Level Dependencies (Linux):**
     In addition to the Python packages, AffectLink requires certain system-level libraries. If you are running a Debian/Ubuntu-based Linux system, you can install these with:
 
     ```bash
@@ -177,28 +195,35 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
 
     These install dependencies for OpenCV (facial analysis), SoundDevice (audio input), and FFmpeg (audio/video processing).
 
-4.  **Download Pre-trained Models (First Run):**
-    The first time `main_processor.py` (which is run by `run_app.py`) is executed, it will attempt to download the pre-trained DeepFace, Whisper, and Hugging Face models. Ensure you have an internet connection for this step. These models will be cached locally.
-
 5.  **Deploy AI Models via HP AI Studio (CRITICAL FOR JUDGING):**
     AffectLink's core AI models (Whisper for ASR, Hugging Face model for SER, and Hugging Face model for Text Emotion) are designed to be deployed as local API endpoints using HP AI Studio's Swagger functionality. This demonstrates our "local-first" and secure inference approach.
 
     * **A. Register Models to MLflow:**
-        * Open HP AI Studio and navigate to the project where you intend to run AffectLink.
-        * Run `python run_app.py` for the first time. This script is designed to:
+        * Start the workspace you just created and enter a terminal from inside of the jupyterlab interface under the "other" section
+        * Use the following command to Activate the correct enviornment: "conda activate aistudio"
+        * cd AffectLink/deployment/registration
+        * Register the models:
+            * python register_ser_classifier.py
+            * python register_text_classifier.py
+            * python register_whisper.py 
+        * These scripts are designed to:
             * Trigger the necessary model downloads (if not already cached).
             * Initialize MLflow tracking.
             * Register the Whisper, SER, and Text Emotion models to your local MLflow instance within HP AI Studio. You should see entries for these models in the "Models" section of the HP AI Studio UI.
-        * Confirm successful model registration by checking the MLflow UI within HP AI Studio (`http://localhost:5000` or similar, as configured by your AI Studio instance).
+        * Confirm successful model registration.
+            * In the nagivation links under the project title, select "Monitor"
+            * Within the Experiments tab, you should see the AffectLink_Model_Registration
+            * Within the Models tab, you should see the 3 models that we registered.
 
     * **B. Deploy Models to Swagger API Endpoints:**
         * In the HP AI Studio UI, go to the "Deployments" tab.
-        * Click "New Deployment."
+        * Click "New Service."
         * For each of the registered models (Whisper, SER, Text Emotion), create a new deployment:
-            * Select the respective model name and its latest version from the dropdowns.
-            * Choose "GPU Optimized" if applicable for better performance.
-            * Select the appropriate workspace.
-            * Give it a descriptive name (e.g., `affectlink-whisper`, `affectlink-ser`, `affectlink-text-emo`).
+            * Service name: Name the deployment something different and identifiable for each model (e.g. whisper, or SER, or text-classifier)
+            * Select your model: Select the respective model name and its latest version from the dropdowns.
+            * Choose model version: Select the model version. A new version is created every time the registration script is run, so use the latest successful deployment ("1" if registration completed without any problems the first time)
+            * GPU configuration: Choose "With GPU" if applicable for better performance.
+            * Select the name of the workspace you just created.
             * Click "Deploy."
         * Once deployed, navigate back to the "Deployments" tab. For each deployment, click the "Play" button to spin up the local API endpoint.
         * **Obtain Endpoint URLs:** After each model is running, click on the **link icon** next to its deployment name. This will open a new browser tab with the Swagger UI for that specific model's endpoint. **Copy the full URL from your browser's address bar for each model.**
@@ -209,25 +234,25 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
     * **Set Environment Variables:** Before running `run_app.py`, set the following environment variables with the actual URLs you obtained from HP AI Studio's Swagger UI for each respective model.
         * **For Windows (PowerShell):**
             ```powershell
-            $env:AFFECTLINK_WHISPER_API_URL="http://localhost:XXXXX/v1/models/whisper:predict"
-            $env:AFFECTLINK_SER_API_URL="http://localhost:XXXXX/v1/models/ser:predict"
-            $env:AFFECTLINK_TEXT_CLASSIFIER_API_URL="http://localhost:XXXXX/v1/models/text_classifier:predict"
+            $env:AFFECTLINK_WHISPER_API_URL="https://localhost:XXXXX/invocations"
+            $env:AFFECTLINK_SPEECHTEXT_API_URL="https://localhost:XXXXX/invocations"
+            $env:AFFECTLINK_SER_API_URL="https://localhost:XXXXX/invocations"
             # Replace XXXXX with the respective dynamic port numbers.
             ```
         * **For Linux/macOS (Bash/Zsh):**
             ```bash
-            export AFFECTLINK_WHISPER_API_URL="http://localhost:XXXXX/v1/models/whisper:predict"
-            export AFFECTLINK_SER_API_URL="http://localhost:XXXXX/v1/models/ser:predict"
-            export AFFECTLINK_TEXT_CLASSIFIER_API_URL="http://localhost:XXXXX/v1/models/text_classifier:predict"
+            export AFFECTLINK_WHISPER_API_URL="https://localhost:XXXXX/invocations"
+            export AFFECTLINK_TEXT_CLASSIFIER_API_URL="https://localhost:XXXXX/invocations"
+            export AFFECTLINK_SER_API_URL="https://localhost:XXXXX/invocations"
             # Replace XXXXX with the respective dynamic port numbers
             ```
         * *Remember to open a new terminal or PowerShell window for these variables to take effect if you set them permanently.*
 
 7.  **Run the AffectLink Application ("Run All" for Judging):**
-    Now that your models are deployed via HP AI Studio and your application is configured with their endpoints, you can launch AffectLink.
+    Now that your models are deployed via HP AI Studio and your application is configured with their endpoints, you can launch AffectLink, from within your machine's local terminal (not AI Studio)
 
     ```bash
-    python run_app.py
+    python .\app\run_app.py
     ```
     This script will:
     * Start the `main_processor.py` for audio and video capture, and emotion analysis.
