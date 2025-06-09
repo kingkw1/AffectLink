@@ -196,7 +196,10 @@ graph TD
 
 ## ✨ Future Work
 
-  - Add sentiment summarization of conversation.
-  - Improve emotion classification with lightweight transformers.
-  - Extend to triadic (3+ participants) sessions.
-  - Further investigate full DeepFace integration with HP AI Studio model deployment.
+-   **Enhanced Visualization for Temporal Analysis:** Implement real-time, scrolling line plots of emotional consistency (ECI) and individual emotion scores over time. This will allow clinicians to observe trends and dynamic shifts in emotional states throughout a session.
+-   **Longitudinal Emotional Tracking & Reporting:** Extend the system to track and analyze emotional patterns across multiple sessions for the same individual. This would enable clinicians to identify long-term trends, monitor progress, and gain a holistic view of a patient's emotional journey over time.
+-   **Develop Methods for Analyzing Interpersonal Emotional Synchrony:** Investigate the temporal alignment and co-regulation of emotional states between the patient and the provider. This would involve exploring techniques to assess emotional "jiving" and interaction dynamics, providing insights into rapport, empathy, and the bidirectional emotional flow within therapeutic sessions.
+-   **Optimized Emotion Classification Models:** Investigate and integrate more lightweight transformer models for Speech Emotion Recognition (SER) and Text Emotion classification. The goal is to further reduce the computational load on the local machine while maintaining high accuracy, ensuring even smoother real-time performance.
+-   **Further DeepFace Integration with HP AI Studio:** Continue to investigate and resolve technical challenges to achieve full integration of the DeepFace model within HP AI Studio's model deployment pipeline. This would centralize all AI inference management within the HP AI Studio environment.
+-   **Configurable Alerting & Thresholds:** Allow clinicians to set customizable alerts or thresholds for specific emotional states or ECI values. This would proactively flag moments of potential distress or inconsistency, guiding the clinician's attention.
+-   **Extension to Multi-Participant Sessions:** Explore the capability to process and analyze interactions in sessions involving more than two participants (e.g., group therapy or family sessions), focusing on identifying overall group emotional dynamics and individual contributions.
