@@ -46,7 +46,7 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
 
 1.  **Clone the Repository:**
     ```bash
-    git clone https://github.com/kingkw1/AffectLink.git
+    git clone [https://github.com/kingkw1/AffectLink.git](https://github.com/kingkw1/AffectLink.git)
     cd AffectLink
     ```
 
@@ -57,10 +57,20 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
     ```
     *Note: This will install all necessary libraries, including `deepface`, `sounddevice`, `streamlit`, `mlflow`, `transformers`, etc.*
 
-3.  **Download Pre-trained Models (First Run):**
+3.  **System-Level Dependencies (Linux):**
+        In addition to the Python packages, AffectLink requires certain system-level libraries. If you are running a Debian/Ubuntu-based Linux system, you can install these with:
+
+        ```bash
+        sudo apt-get update
+        sudo apt-get install -y libgl1-mesa-glx portaudio19-dev ffmpeg
+        ```
+
+        These install dependencies for OpenCV (facial analysis), SoundDevice (audio input), and FFmpeg (audio/video processing).
+
+4.  **Download Pre-trained Models (First Run):**
     The first time `main_processor.py` (which is run by `run_app.py`) is executed, it will attempt to download the pre-trained DeepFace, Whisper, and Hugging Face models. Ensure you have an internet connection for this step. These models will be cached locally.
 
-4.  **Deploy AI Models via HP AI Studio (CRITICAL FOR JUDGING):**
+5.  **Deploy AI Models via HP AI Studio (CRITICAL FOR JUDGING):**
     AffectLink's core AI models (Whisper for ASR, Hugging Face model for SER, and Hugging Face model for Text Emotion) are designed to be deployed as local API endpoints using HP AI Studio's Swagger functionality. This demonstrates our "local-first" and secure inference approach.
 
     * **A. Register Models to MLflow:**
@@ -108,6 +118,27 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
 
     *Troubleshooting:* If the Streamlit application doesn't open automatically, look for a message in your terminal indicating the local URL (e.g., `http://localhost:8501`).
 
+6.  **Configure AffectLink with Deployed Model Endpoints (CRITICAL):**
+    Since your Streamlit application (`dashboard.py`) runs as a separate process and connects to these dynamically deployed models, you need to provide their dynamically assigned API endpoint URLs via environment variables.
+
+    * **Set Environment Variables:** Before running `run_app.py`, set the following environment variables with the actual URLs you obtained from HP AI Studio's Swagger UI for each respective model.
+        * **For Windows (PowerShell):**
+            ```powershell
+            $env:AFFECTLINK_WHISPER_API_URL="http://localhost:PORT_WHISPER/v1/models/whisper:predict"
+            $env:AFFECTLINK_SER_API_URL="http://localhost:PORT_SER/v1/models/ser:predict"
+            $env:AFFECTLINK_TEXT_CLASSIFIER_API_URL="http://localhost:PORT_TEXT_CLASSIFIER/v1/models/text_classifier:predict"
+            # Replace PORT_WHISPER, PORT_SER, PORT_TEXT_CLASSIFIER with the actual dynamic port numbers.
+            ```
+        * **For Linux/macOS (Bash/Zsh):**
+            ```bash
+            export AFFECTLINK_WHISPER_API_URL="http://localhost:PORT_WHISPER/v1/models/whisper:predict"
+            export AFFECTLINK_SER_API_URL="http://localhost:PORT_SER/v1/models/ser:predict"
+            export AFFECTLINK_TEXT_CLASSIFIER_API_URL="http://localhost:PORT_TEXT_CLASSIFIER/v1/models/text_classifier:predict"
+            # Replace PORT_WHISPER, PORT_SER, PORT_TEXT_CLASSIFIER with the actual dynamic port numbers.
+            ```
+        * *Remember to open a new terminal or PowerShell window for these variables to take effect if you set them permanently.*
+
+
 ### Expected Behavior
 
 * The Streamlit application will display live video feedback.
@@ -150,35 +181,34 @@ graph TD
     style F fill:#cceeff,stroke:#333,color:#1a1a1a
     style G fill:#ffcccc,stroke:#333,color:#1a1a1a
     style TempFiles fill:#f8f8f8,stroke:#999,stroke-dasharray: 5 5,color:#1a1a1a
-```
+````
 
 ### Explanation of Models and Methods
 
-* **DeepFace (Facial Emotion Analysis):**
-    * **Method:** This library is used for real-time facial expression detection and classification. It leverages pre-trained convolutional neural networks to identify emotions from video frames.
-    * **Deployment:** Currently runs directly on the local machine via its Python library due to integration complexities encountered with HP AI Studio's model deployment for this specific library within the hackathon timeframe. It processes frames streamed from the webcam.
-* **Whisper (ASR - Automatic Speech Recognition):**
-    * **Method:** OpenAI's robust Whisper model is used for high-accuracy speech-to-text transcription. It processes audio chunks to convert spoken language into text.
-    * **Deployment:** Registered with MLflow and deployed as a local API endpoint via HP AI Studio's Swagger functionality. The `main_processor.py` sends audio data to this locally hosted endpoint for inference.
-* **Speech Emotion Recognition (SER) Model (Hugging Face Transformers):**
-    * **Method:** A fine-tuned Hugging Face transformer model is used to analyze vocal tone and classify speech into various emotion categories (e.g., happiness, sadness, anger).
-    * **Deployment:** Registered with MLflow and deployed as a local API endpoint via HP AI Studio's Swagger functionality. It processes audio data sent to its locally hosted endpoint.
-* **Text Emotion Model (Hugging Face Transformers):**
-    * **Method:** A pre-trained or fine-tuned Hugging Face transformer model is used to analyze the sentiment and emotional tone of the transcribed text (from Whisper).
-    * **Deployment:** Registered with MLflow and deployed as a local API endpoint via HP AI Studio's Swagger functionality. It processes transcribed text data sent to its locally hosted endpoint.
+  * **DeepFace (Facial Emotion Analysis):**
+      * **Method:** This library is used for real-time facial expression detection and classification. It leverages pre-trained convolutional neural networks to identify emotions from video frames.
+      * **Deployment:** Currently runs directly on the local machine via its Python library due to integration complexities encountered with HP AI Studio's model deployment for this specific library within the hackathon timeframe. It processes frames streamed from the webcam.
+  * **Whisper (ASR - Automatic Speech Recognition):**
+      * **Method:** OpenAI's robust Whisper model is used for high-accuracy speech-to-text transcription. It processes audio chunks to convert spoken language into text.
+      * **Deployment:** Registered with MLflow and deployed as a local API endpoint via HP AI Studio's Swagger functionality. The `main_processor.py` sends audio data to this locally hosted endpoint for inference.
+  * **Speech Emotion Recognition (SER) Model (Hugging Face Transformers):**
+      * **Method:** A fine-tuned Hugging Face transformer model is used to analyze vocal tone and classify speech into various emotion categories (e.g., happiness, sadness, anger).
+      * **Deployment:** Registered with MLflow and deployed as a local API endpoint via HP AI Studio's Swagger functionality. It processes audio data sent to its locally hosted endpoint.
+  * **Text Emotion Model (Hugging Face Transformers):**
+      * **Method:** A pre-trained or fine-tuned Hugging Face transformer model is used to analyze the sentiment and emotional tone of the transcribed text (from Whisper).
+      * **Deployment:** Registered with MLflow and deployed as a local API endpoint via HP AI Studio's Swagger functionality. It processes transcribed text data sent to its locally hosted endpoint.
 
 ### Security Note
 
-* **No API Keys Embedded:** This project is designed to run locally. If future integrations require third-party API keys, ensure they are managed securely using environment variables (e.g., `os.environ`), not embedded directly in the code.
+  * **No API Keys Embedded:** This project is designed to run locally. If future integrations require third-party API keys, ensure they are managed securely using environment variables (e.g., `os.environ`), not embedded directly in the code.
 
-## 📄 Demo Video
+## 🎥 Demo Video
+
 [Hackathon Submission Video](https://youtu.be/rzp9CGChHJ4)
 
 ## ✨ Future Work
-- Add sentiment summarization of conversation.
-- Improve emotion classification with lightweight transformers.
-- Extend to triadic (3+ participants) sessions.
-- Further investigate full DeepFace integration with HP AI Studio model deployment.
 
----
-Built by Kevin King for the HP AI Studio & NVIDIA Developer Challenge.
+  - Add sentiment summarization of conversation.
+  - Improve emotion classification with lightweight transformers.
+  - Extend to triadic (3+ participants) sessions.
+  - Further investigate full DeepFace integration with HP AI Studio model deployment.
