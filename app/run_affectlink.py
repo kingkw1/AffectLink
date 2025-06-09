@@ -181,27 +181,6 @@ def run_detector(emotion_queue, stop_event, shared_frame_queue=None):
     finally:
         print("Emotion detection process stopped")
 
-def test_webcam():
-    """Test if webcam is available and functioning."""
-    print("Testing webcam availability...")
-    try:
-        # Using our imported camera_utils module
-        camera_idx, backend, cap = find_available_camera()
-        
-        if cap is not None:
-            # Store the working camera info in environment variables
-            os.environ['WEBCAM_INDEX'] = str(camera_idx)
-            os.environ['WEBCAM_BACKEND'] = backend
-            print(f"Successfully found camera {camera_idx} with {backend} backend")
-            cap.release()
-            return True
-        
-        print("Warning: Cannot access any webcam. Some features may not work properly.")
-        return False
-    except Exception as e:
-        print(f"Warning: Webcam test failed with error: {e}")
-        return False
-
 def signal_handler(signum, frame):
     """Handle Ctrl+C to gracefully stop all processes"""
     global stop_event, dashboard_process, detector_process
