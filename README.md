@@ -54,6 +54,8 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
     It's highly recommended to use a Python virtual environment to manage dependencies. This ensures that AffectLink's libraries don't conflict with other Python projects on your system.
 
     * **A. Create a Virtual Environment (Recommended Python 3.10):**
+        It's highly recommended to use Python 3.10 for this project.
+
         * **For Windows Users:**
             If `python3.10` is not directly recognized as a command, you have a few options:
             * **Option 1 (Recommended for most Windows users):** Use the `py` launcher if Python is installed via the official installer and `py` is in your PATH.
@@ -79,7 +81,7 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
             ```bash
             .venv\Scripts\activate
             ```
-        * **For Windows (PowerShell):**
+        * **For Windows (PowerShell):
             ```powershell
             .venv\Scripts\Activate.ps1
             ```
@@ -96,11 +98,27 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
         *Ensure this command outputs `Python 3.10.x` or similar.* If it does not, deactivate the venv (e.g., by closing and reopening your terminal or typing `deactivate`) and retry creating it using a different method from Step 2A that correctly points to Python 3.10.
 
     * **D. Install Required Python Packages:**
-        With your virtual environment activated, install the necessary libraries from `requirements.txt`. This file contains the exact versions of packages used in the tested Python 3.10 environment to ensure maximum compatibility.
+        Before installing, **please edit your `requirements.txt` file.** Locate the lines that specify `torch` and `torchaudio` (e.g., `torch==2.7.0+cu128` and `torchaudio==2.7.0+cu128`) and **remove them or comment them out (`#`)**. You will install these separately to ensure correct CUDA compatibility.
+
+        With your virtual environment activated, install the remaining necessary libraries from the *modified* `requirements.txt`:
         ```bash
         pip install -r requirements.txt
         ```
-        *Note: This will install all necessary libraries, including `deepface`, `sounddevice`, `streamlit`, `mlflow`, `transformers`, `torch`, etc.*
+
+        **Then, install PyTorch and Torchaudio separately, based on your system's GPU (CUDA) setup:**
+
+        * **Option 1: For systems with NVIDIA GPU and CUDA 12.x installed (most common for HP AI Studio users):**
+            To find your exact CUDA version, on Windows, check the NVIDIA Control Panel or run `nvidia-smi` in PowerShell/CMD. On Linux, run `nvcc --version`. Replace `cu12x` with your specific CUDA version (e.g., `cu121` for CUDA 12.1, `cu122` for CUDA 12.2, etc.). For CUDA 12.8, use `cu128`.
+            ```bash
+            pip install torch==2.7.0 torchaudio==2.7.0 --index-url [https://download.pytorch.org/whl/cu128](https://download.pytorch.org/whl/cu128)
+            # IMPORTANT: Make sure to replace 'cu128' with your actual CUDA version if different.
+            # Example for CUDA 12.1: pip install torch==2.7.0 torchaudio==2.7.0 --index-url [https://download.pytorch.org/whl/cu121](https://download.pytorch.org/whl/cu121)
+            ```
+        * **Option 2: For systems without an NVIDIA GPU, or if you prefer a CPU-only installation:**
+            ```bash
+            pip install torch==2.7.0 torchaudio==2.7.0 --index-url [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)
+            ```
+        *Note: The `torch` and `torchaudio` versions (`2.7.0` in these commands) should match the base version from your original `requirements.txt`.*
 
 3.  **System-Level Dependencies (Linux):**
     In addition to the Python packages, AffectLink requires certain system-level libraries. If you are running a Debian/Ubuntu-based Linux system, you can install these with:
