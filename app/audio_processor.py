@@ -761,14 +761,14 @@ def audio_processing_loop(shared_state, audio_lock, whisper_model, text_emotion_
 
                     # Determine dominant text emotion from the *unified* scores for immediate display/smoothing
                     # This uses the most confident unified emotion from the normalized vector.
-                    current_unified_text_emotion = "unknown"
-                    current_text_score = 0.0
+                    unified_text_emotion = "unknown"
+                    text_score = 0.0
                     if unified_text_scores and any(s > 0 for s in unified_text_scores.values()):
-                        current_unified_text_emotion = max(unified_text_scores, key=unified_text_scores.get)
-                        current_text_score = unified_text_scores[current_unified_text_emotion]
+                        unified_text_emotion = max(unified_text_scores, key=unified_text_scores.get)
+                        text_score = unified_text_scores[unified_text_emotion]
 
-                    shared_state['text_emotion'] = (current_unified_text_emotion, current_text_score)
-                    logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({current_unified_text_emotion}, {current_text_score:.2f})")
+                    shared_state['text_emotion'] = (unified_text_emotion, text_score)
+                    logger.info(f"SHARED_STATE UPDATE: text_emotion set to ({unified_text_emotion}, {text_score:.2f})")
 
                     # Append the *full unified scores* to history for more comprehensive smoothing if needed later
                     shared_state['text_emotion_history'].append({

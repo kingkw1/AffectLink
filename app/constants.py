@@ -32,7 +32,7 @@ VERBOSE_OUTPUT = False
 # Model IDs
 TEXT_CLASSIFIER_MODEL_ID = "j-hartmann/emotion-english-distilroberta-base"
 SER_MODEL_ID = "superb/hubert-large-superb-er"
-AUDIO_CHUNK_SIZE = 5   # Record 5 seconds at a time
+AUDIO_CHUNK_SIZE = 5   # Record n seconds at a time
 
 # Audio recording settings
 AUDIO_SAMPLE_RATE = 16000 # Changed from 44100 to 16000
