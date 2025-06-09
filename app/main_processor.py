@@ -97,7 +97,6 @@ def get_consistency_level(cosine_sim):
     else:
         return "Very Low"
 
-
 def create_unified_emotion_vector(emotion_scores, mapping_dict):
     """
     Create a vector of scores in the unified emotion space
@@ -153,9 +152,6 @@ def clear_stale_files():
             
     except Exception as e:
         logger.warning(f"Error clearing stale files: {e}")
-
-# Clear stale files at module import time
-clear_stale_files()
 
 def calculate_cosine_similarity(vector_a, vector_b):
     """
@@ -484,6 +480,9 @@ def main(
         # Giving a brief moment for daemon threads to attempt cleanup if they have try/finally blocks
         time.sleep(1) 
         logger.info("Main_processor finished.")
+
+# Clear stale files at module import time
+clear_stale_files()
 
 if __name__ == '__main__':
     # This part is typically called by start_realtime.py or run_affectlink.py as a subprocess

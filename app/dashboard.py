@@ -101,6 +101,31 @@ consistency_container = None
 overall_emotion_container = None
 video_placeholder = st.empty() # From original code, ensure it's preserved if used
 
+# Main Streamlit app UI layout
+st.title("AffectLink Real-time Multimodal Emotion Analysis")
+
+# Create placeholders for dynamic content
+col1, col2 = st.columns([3, 2])
+
+with col1:
+    st.subheader("Video Feed")
+    video_container = st.empty()
+    
+    st.subheader("Transcribed Audio")
+    text_container = st.empty()
+
+with col2:
+    st.subheader("Emotion Analysis")
+    facial_emotion_container = st.empty()
+    st.markdown("---")
+    st.markdown("### Audio Analysis")
+    text_emotion_container = st.empty()
+    audio_emotion_container = st.empty()
+    st.markdown("---")
+    st.markdown("### Overall Consistency")
+    consistency_container = st.empty()
+    overall_emotion_container = st.empty()
+
 def get_consistency_level(cosine_sim):
     """Convert cosine similarity to consistency level label"""
     if cosine_sim >= 0.8:
@@ -585,30 +610,6 @@ def receive_emotion_data_thread(mp_queue, stop_event):
     else:
         print("Audio data receiver thread stopped due to audio toggle disabled")
 
-# Main Streamlit app UI layout
-st.title("AffectLink Real-time Multimodal Emotion Analysis")
-
-# Create placeholders for dynamic content
-col1, col2 = st.columns([3, 2])
-
-with col1:
-    st.subheader("Video Feed")
-    video_container = st.empty()
-    
-    st.subheader("Transcribed Audio")
-    text_container = st.empty()
-
-with col2:
-    st.subheader("Emotion Analysis")
-    facial_emotion_container = st.empty()
-    st.markdown("---")
-    st.markdown("### Audio Analysis")
-    text_emotion_container = st.empty()
-    audio_emotion_container = st.empty()
-    st.markdown("---")
-    st.markdown("### Overall Consistency")
-    consistency_container = st.empty()
-    overall_emotion_container = st.empty()
 
 # Define the main function for the dashboard application
 def main(emotion_queue_param=None, stop_event_param=None, frame_queue_param=None): # Renamed params to avoid conflict
