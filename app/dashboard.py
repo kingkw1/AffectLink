@@ -1,4 +1,3 @@
-# Suppress missing ScriptRunContext and set Streamlit log level before import
 import os
 os.environ['STREAMLIT_LOG_LEVEL'] = 'error'
 import warnings

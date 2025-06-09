@@ -1,6 +1,8 @@
+import os
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 import time # Added for timestamps
 from collections import deque
-import os
 import tempfile
 import math
 import json
