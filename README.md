@@ -46,16 +46,61 @@ Follow these instructions meticulously to set up and run AffectLink locally, dem
 
 1.  **Clone the Repository:**
     ```bash
-    git clone [https://github.com/kingkw1/AffectLink.git](https://github.com/kingkw1/AffectLink.git)
+    git clone https://github.com/kingkw1/AffectLink.git
     cd AffectLink
     ```
 
-2.  **Install Python Dependencies:**
-    Navigate into the cloned directory and install the required Python packages.
-    ```bash
-    pip install -r requirements.txt
-    ```
-    *Note: This will install all necessary libraries, including `deepface`, `sounddevice`, `streamlit`, `mlflow`, `transformers`, etc.*
+2.  **Set Up and Install Python Dependencies:**
+    It's highly recommended to use a Python virtual environment to manage dependencies. This ensures that AffectLink's libraries don't conflict with other Python projects on your system.
+
+    * **A. Create a Virtual Environment (Recommended Python 3.10):**
+        * **For Windows Users:**
+            If `python3.10` is not directly recognized as a command, you have a few options:
+            * **Option 1 (Recommended for most Windows users):** Use the `py` launcher if Python is installed via the official installer and `py` is in your PATH.
+                ```bash
+                py -3.10 -m venv .venv
+                ```
+            * **Option 2 (If `py` launcher is not available):** Use the generic `python` command, then verify its version in the next step.
+                ```bash
+                python -m venv .venv
+                ```
+            * **Option 3 (Direct Path - if previous options fail):** Specify the full path to your Python 3.10 executable. Replace `YOUR_USERNAME` with your actual Windows username.
+                ```bash
+                "C:\Users\YOUR_USERNAME\AppData\Local\Programs\Python\Python310\python.exe" -m venv .venv
+                ```
+        * **For Linux/macOS Users:**
+            ```bash
+            python3.10 -m venv .venv
+            # If 'python3.10' is not found, try 'python3 -m venv .venv' or 'python -m venv .venv'
+            ```
+
+    * **B. Activate the Virtual Environment:**
+        * **For Windows (Command Prompt):**
+            ```bash
+            .venv\Scripts\activate
+            ```
+        * **For Windows (PowerShell):**
+            ```powershell
+            .venv\Scripts\Activate.ps1
+            ```
+        * **For Linux/macOS (Bash/Zsh):**
+            ```bash
+            source .venv/bin/activate
+            ```
+
+    * **C. Verify Python Version (Crucial Step):**
+        After activating your virtual environment, it is **critical** to confirm that the correct Python version (ideally 3.10.x) is active before installing dependencies.
+        ```bash
+        python --version
+        ```
+        *Ensure this command outputs `Python 3.10.x` or similar.* If it does not, deactivate the venv (e.g., by closing and reopening your terminal or typing `deactivate`) and retry creating it using a different method from Step 2A that correctly points to Python 3.10.
+
+    * **D. Install Required Python Packages:**
+        With your virtual environment activated, install the necessary libraries from `requirements.txt`. This file contains the exact versions of packages used in the tested Python 3.10 environment to ensure maximum compatibility.
+        ```bash
+        pip install -r requirements.txt
+        ```
+        *Note: This will install all necessary libraries, including `deepface`, `sounddevice`, `streamlit`, `mlflow`, `transformers`, `torch`, etc.*
 
 3.  **System-Level Dependencies (Linux):**
     In addition to the Python packages, AffectLink requires certain system-level libraries. If you are running a Debian/Ubuntu-based Linux system, you can install these with:
