@@ -1,4 +1,8 @@
-# AffectLink: Multimodal Emotion Consistency Tracking for Telehealth
+# AffectLink: Multimodal Emotion Consistency Tracking for Telehealth AffectLink: Multimodal Emotion Consistency Tracking for Telehealth
+
+<p align="center">
+  <img src="assets/thumbnail.png" alt="AffectLink Thumbnail" width="800"/>
+</p>
 
 **AffectLink** is an AI-powered system designed to bridge the empathy gap in tele-healthcare. It provides real-time, local-first multimodal emotional analysis of patients during virtual sessions by comparing facial expressions, vocal tone, and spoken content. Its core innovation, the **Emotional Consistency Index (ECI)**, highlights discrepancies between verbal and non-verbal cues, offering clinicians deeper insights into unexpressed emotions, fatigue, or stress. All processing occurs securely and locally on the HP workstation, ensuring patient privacy and HIPAA compliance.
 
